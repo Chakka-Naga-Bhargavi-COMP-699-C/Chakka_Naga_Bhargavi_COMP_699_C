@@ -271,3 +271,280 @@ class AuthManager:
                 logging.warning(f"Failed to delete history: {e}")
             return True
         return False
+# =========================
+#      History Store
+# =========================
+
+class HistoryManager:
+    """
+    Stores history per user in history/history_<email>.json:
+    [
+      {
+        "timestamp": "...",
+        "type": "food|book|drink",
+        "label": "Lasagna",
+        "metadata": {...source ids...},
+        "weather": {...snapshot from WeatherTab.latest...}
+      }, ...
+    ]
+    """
+    @staticmethod
+    def history_path_for(email: str) -> str:
+        safe = re.sub(r"[^a-zA-Z0-9_.-]+", "_", email)
+        return os.path.join(HISTORY_DIR, f"history_{safe}.json")
+
+    def __init__(self, user_email: str):
+        self.user_email = user_email
+        self.path = self.history_path_for(user_email)
+        self.items = load_json(self.path, [])
+
+    def add(self, item_type: str, label: str, metadata: Dict, weather_snapshot: Dict):
+        entry = {
+            "timestamp": now_iso(),
+            "type": item_type,
+            "label": label,
+            "metadata": metadata or {},
+            "weather": weather_snapshot or {},
+        }
+        self.items.append(entry)
+        self.save()
+
+    def delete_index(self, idx: int):
+        if 0 <= idx < len(self.items):
+            del self.items[idx]
+            self.save()
+
+    def save(self):
+        save_json(self.path, self.items)
+
+    def export_csv(self, filepath: str, selection: Optional[List[int]] = None):
+        rows = [self.items[i] for i in (selection or range(len(self.items)))]
+
+        with open(filepath, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["timestamp", "type", "label", "metadata", "weather"])
+            for r in rows:
+                w.writerow([r["timestamp"], r["type"], r["label"],
+                            json.dumps(r["metadata"], ensure_ascii=False),
+                            json.dumps(r["weather"], ensure_ascii=False)])
+
+    def export_json(self, filepath: str, selection: Optional[List[int]] = None):
+        rows = [self.items[i] for i in (selection or range(len(self.items)))]
+
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(rows, f, indent=2, ensure_ascii=False)
+
+# =========================
+#        Catalogs (NEW)
+# =========================
+
+class CatalogManager:
+    """
+    Simple local catalogs for admin CRUD.
+    Schema:
+    {
+      "foods": ["Mac and Cheese", "Ramen", ...],
+      "beverages": ["Mango shake", "Iced Tea", ...],
+      "books": ["The Hobbit", "Atomic Habits", ...]
+    }
+    """
+    DEFAULT = {"foods": [], "beverages": [], "books": []}
+
+    def __init__(self, path: str, notifier: Optional[AdminNotifier] = None):
+        self.path = path
+        self.notifier = notifier
+        self.data = self._load_with_guard()
+
+    def _load_with_guard(self):
+        data = None
+        try:
+            if os.path.exists(self.path):
+                with open(self.path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+        except Exception as e:
+            logging.error(f"Catalog load failed: {e}")
+            if self.notifier:
+                self.notifier.alert(
+                    "Catalog Error",
+                    "Catalogs could not be read (file may be corrupted). A fresh catalog will be created."
+                )
+        if not isinstance(data, dict):
+            data = json.loads(json.dumps(self.DEFAULT))  # deep copy
+            self._save_with_guard(data)
+        # normalize keys
+        for k in ("foods", "beverages", "books"):
+            data.setdefault(k, [])
+            if not isinstance(data[k], list):
+                data[k] = []
+        return data
+
+    def _save_with_guard(self, data: dict) -> bool:
+        ok = save_json(self.path, data)
+        if not ok and self.notifier:
+            self.notifier.alert("Catalog Save Error", "Failed to save catalogs to disk.")
+        return ok
+
+    def all(self) -> dict:
+        return self.data
+
+    def add_item(self, category: str, value: str) -> bool:
+        category = category.lower()
+        if category not in self.data:
+            self.data[category] = []
+        if value and value not in self.data[category]:
+            self.data[category].append(value)
+            return self._save_with_guard(self.data)
+        return False
+
+    def edit_item(self, category: str, old_value: str, new_value: str) -> bool:
+        category = category.lower()
+        lst = self.data.get(category, [])
+        try:
+            idx = lst.index(old_value)
+            lst[idx] = new_value
+            return self._save_with_guard(self.data)
+        except ValueError:
+            return False
+
+    def delete_item(self, category: str, value: str) -> bool:
+        category = category.lower()
+        lst = self.data.get(category, [])
+        try:
+            lst.remove(value)
+            return self._save_with_guard(self.data)
+        except ValueError:
+            return False
+
+# -------------------------------
+#            API Clients
+# -------------------------------
+
+class WeatherClient:
+    """Lightweight OpenWeatherMap wrapper for current weather."""
+    def __init__(self, api_key: str, notifier: Optional[AdminNotifier] = None):
+        self.api_key = api_key
+        self.notifier = notifier
+
+    def current_by_city(self, city: str) -> Dict:
+        url = "https://api.openweathermap.org/data/2.5/weather"
+        params = {"q": city, "appid": self.api_key, "units": "metric"}
+        try:
+            r = requests.get(url, params=params, timeout=12)
+            r.raise_for_status()
+            data = r.json()
+            if not data or "weather" not in data or "main" not in data:
+                raise ValueError("Unexpected weather payload")
+            weather = data["weather"][0]
+            return {
+                "city": data.get("name") or city,
+                "description": weather.get("description", "").capitalize(),
+                "temp_c": data["main"].get("temp"),
+                "icon": weather.get("icon"),         # e.g. '10d'
+                "feels_like": data["main"].get("feels_like"),
+                "humidity": data["main"].get("humidity"),
+                "wind": (data.get("wind") or {}).get("speed"),
+                "raw": data,
+            }
+        except Exception as e:
+            logging.error(f"Weather error: {e}")
+            # NEW: Let admins know something went wrong
+            if self.notifier:
+                self.notifier.alert("Weather API Error", f"Failed to fetch weather: {e}")
+            return {"error": str(e)}
+
+    @staticmethod
+    def icon_url(icon_code: str) -> str:
+        return f"https://openweathermap.org/img/wn/{icon_code}@2x.png"
+
+class SpoonacularClient:
+    """Spoonacular recipe search (complexSearch)."""
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+
+    def search(self, query: str, number: int = 8, tags: Optional[List[str]] = None) -> List[Dict]:
+        url = "https://api.spoonacular.com/recipes/complexSearch"
+        params = {
+            "apiKey": self.api_key,
+            "query": query,
+            "number": number,
+            "addRecipeInformation": True,
+            "instructionsRequired": True,
+        }
+        if tags:
+            params["diet"] = ",".join(tags)  # or use cuisine/intolerances if you prefer
+        try:
+            r = requests.get(url, params=params, timeout=12)
+            r.raise_for_status()
+            data = r.json()
+            return data.get("results", [])
+        except Exception as e:
+            logging.error(f"Spoonacular error: {e}")
+            return []
+
+class GoogleBooksClient:
+    """Google Books simple search wrapper."""
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+
+    def search(self, query: str, max_results: int = 20, start_index: int = 0) -> List[Dict]:
+        url = "https://www.googleapis.com/books/v1/volumes"
+        params = {
+            "q": query,
+            "key": self.api_key,
+            "maxResults": max(1, min(max_results, 40)),
+            "startIndex": max(0, start_index),
+            "printType": "books"
+        }
+        try:
+            r = requests.get(url, params=params, timeout=12)
+            r.raise_for_status()
+            data = r.json()
+            return data.get("items", [])
+        except Exception as e:
+            logging.error(f"Google Books error: {e}")
+            return []
+
+class CocktailDBClient:
+    """TheCocktailDB queries."""
+    BASE = "https://www.thecocktaildb.com/api/json/v1/1"
+
+    def search_by_name(self, name: str) -> List[Dict]:
+        try:
+            r = requests.get(f"{self.BASE}/search.php", params={"s": name}, timeout=12)
+            r.raise_for_status()
+            data = r.json()
+            return data.get("drinks") or []
+        except Exception as e:
+            logging.error(f"CocktailDB error: {e}")
+            return []
+
+    def filter_by_alcoholic(self, kind: str) -> List[Dict]:
+        try:
+            r = requests.get(f"{self.BASE}/filter.php", params={"a": kind}, timeout=12)
+            r.raise_for_status()
+            data = r.json()
+            return data.get("drinks") or []
+        except Exception as e:
+            logging.error(f"CocktailDB error: {e}")
+            return []
+
+    def filter_by_ingredient(self, ingredient: str) -> List[Dict]:
+        try:
+            r = requests.get(f"{self.BASE}/filter.php", params={"i": ingredient}, timeout=12)
+            r.raise_for_status()
+            data = r.json()
+            return data.get("drinks") or []
+        except Exception as e:
+            logging.error(f"CocktailDB error: {e}")
+            return []
+
+    def lookup_by_id(self, drink_id: str) -> Optional[Dict]:
+        try:
+            r = requests.get(f"{self.BASE}/lookup.php", params={"i": drink_id}, timeout=12)
+            r.raise_for_status()
+            data = r.json()
+            drinks = data.get("drinks") or []
+            return drinks[0] if drinks else None
+        except Exception as e:
+            logging.error(f"CocktailDB error: {e}")
+            return None
