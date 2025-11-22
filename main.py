@@ -548,3 +548,350 @@ class CocktailDBClient:
         except Exception as e:
             logging.error(f"CocktailDB error: {e}")
             return None
+
+
+# -------------------------------
+#     Weather → Mood Mapping
+# -------------------------------
+
+def derive_mood(weather_desc: str, temp_c: float) -> Dict[str, str]:
+    desc = (weather_desc or "").lower()
+    t = temp_c if isinstance(temp_c, (int, float)) else None
+    if t is not None:
+        if t <= 12:
+            base = {"food_query": "soup", "book_query": "cozy mystery", "cocktail_query": "hot toddy"}
+        elif 12 < t <= 22:
+            base = {"food_query": "comfort casserole", "book_query": "feel good fiction", "cocktail_query": "whiskey sour"}
+        elif 22 < t <= 30:
+            base = {"food_query": "salad bowl", "book_query": "light romance", "cocktail_query": "mojito"}
+        else:
+            base = {"food_query": "ice cream", "book_query": "beach read", "cocktail_query": "piña colada"}
+    else:
+        base = {"food_query": "comfort food", "book_query": "popular fiction", "cocktail_query": "margarita"}
+
+    if any(k in desc for k in ["rain", "drizzle", "storm"]):
+        base.update(food_query="ramen", book_query="cozy fantasy", cocktail_query="irish coffee")
+    elif "snow" in desc:
+        base.update(food_query="chili", book_query="historical fiction", cocktail_query="hot buttered rum")
+    elif any(k in desc for k in ["clear", "sunny"]):
+        base.update(food_query="grilled", book_query="adventure", cocktail_query="aperol spritz")
+    return base
+
+def mood_food_ideas(weather_desc: str, temp_c: float, catalogs: Optional[dict] = None) -> List[str]:
+    """
+    NEW: Appends admin-managed catalog food entries to weather ideas.
+    """
+    m = derive_mood(weather_desc, temp_c)
+    q = m["food_query"].lower()
+    base = []
+    if "soup" in q or "ramen" in q:
+        base = ["Ramen", "Tomato Soup", "Chicken Noodle Soup", "Minestrone", "Pho", "Miso Soup"]
+    elif "casserole" in q or "comfort" in q:
+        base = ["Mac and Cheese", "Shepherd's Pie", "Lasagna", "Chicken Pot Pie", "Baked Ziti"]
+    elif "salad" in q:
+        base = ["Greek Salad", "Caesar Salad", "Pasta Salad", "Quinoa Salad", "Fruit Salad"]
+    elif "ice cream" in q:
+        base = ["Chocolate Ice Cream", "Vanilla Ice Cream", "Mango Sorbet", "Kulfi", "Gelato"]
+    elif "grilled" in q:
+        base = ["Grilled Chicken", "Grilled Paneer", "BBQ Ribs", "Grilled Salmon", "Grilled Veggies"]
+    elif "chili" in q:
+        base = ["Beef Chili", "Chicken Chili", "Vegetarian Chili", "Turkey Chili"]
+    else:
+        base = ["Comfort Food", "Pasta", "Pizza", "Burger", "Stir Fry", "Curry"]
+    extras = (catalogs or {}).get("foods", [])
+    return list(dict.fromkeys(extras + base))  # extras first, dedupe preserving order
+
+def mood_drink_ideas(weather_desc: str, temp_c: float, catalogs: Optional[dict] = None) -> List[str]:
+    desc = (weather_desc or "").lower()
+    t = temp_c if isinstance(temp_c, (int, float)) else None
+    base: List[str]
+    if t is None:
+        base = ["Lemonade", "Iced Tea", "Pineapple drinks", "Watermelon drinks", "Mango drinks", "Mint drinks"]
+    elif t >= 28:
+        base = ["Pineapple drinks", "Watermelon drinks", "Lemonade", "Iced Tea", "Mango drinks", "Mint drinks"]
+    elif 20 <= t < 28:
+        base = ["Berry drinks", "Citrus coolers", "Iced Coffee", "Iced Tea", "Ginger Ale"]
+    elif 10 <= t < 20:
+        base = ["Masala Chai", "Hot Chocolate", "Coffee drinks", "Apple Cider", "Ginger Tea"]
+    else:
+        base = ["Hot Chocolate", "Masala Chai", "Turmeric Latte", "Ginger Tea", "Mulled drinks"]
+    extras = (catalogs or {}).get("beverages", [])
+    return list(dict.fromkeys(extras + base))
+
+# -------------------------------
+#            UI: Auth
+# -------------------------------
+
+class LoginDialog(tk.Toplevel):
+    """Modal auth dialog: Sign In / Register / Reset."""
+    def __init__(self, master, auth: AuthManager):
+        super().__init__(master)
+        self.title("Sign In")
+        self.resizable(False, False)
+        self.auth = auth
+        self.result_email = None
+        self.grab_set()  # modal
+        nb = ttk.Notebook(self)
+        nb.pack(fill="both", expand=True, padx=10, pady=10)
+
+        # --- Sign In ---
+        frm_sign = ttk.Frame(nb)
+        nb.add(frm_sign, text="Sign In")
+        ttk.Label(frm_sign, text="Email").grid(row=0, column=0, sticky="e", padx=6, pady=6)
+        ttk.Label(frm_sign, text="Password").grid(row=1, column=0, sticky="e", padx=6, pady=6)
+        self.si_email = ttk.Entry(frm_sign, width=32)
+        self.si_pass = ttk.Entry(frm_sign, show="*", width=32)
+        self.si_email.grid(row=0, column=1, padx=6, pady=6)
+        self.si_pass.grid(row=1, column=1, padx=6, pady=6)
+        ttk.Button(frm_sign, text="Sign In", command=self._do_sign_in).grid(row=2, column=0, columnspan=2, pady=8)
+
+        # --- Register ---
+        frm_reg = ttk.Frame(nb)
+        nb.add(frm_reg, text="Register")
+        ttk.Label(frm_reg, text="Email").grid(row=0, column=0, sticky="e", padx=6, pady=6)
+        ttk.Label(frm_reg, text="Password").grid(row=1, column=0, sticky="e", padx=6, pady=6)
+        ttk.Label(frm_reg, text="Confirm").grid(row=2, column=0, sticky="e", padx=6, pady=6)
+        self.re_email = ttk.Entry(frm_reg, width=32)
+        self.re_pass = ttk.Entry(frm_reg, show="*", width=32)
+        self.re_conf = ttk.Entry(frm_reg, show="*", width=32)
+        self.re_email.grid(row=0, column=1, padx=6, pady=6)
+        self.re_pass.grid(row=1, column=1, padx=6, pady=6)
+        self.re_conf.grid(row=2, column=1, padx=6, pady=6)
+
+        # NEW: Register-as-admin checkbox
+        self.re_admin_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(frm_reg, text="Register as Admin", variable=self.re_admin_var).grid(
+            row=3, column=0, columnspan=2, pady=(2, 4)
+        )
+
+        ttk.Button(frm_reg, text="Create Account", command=self._do_register).grid(row=4, column=0, columnspan=2, pady=8)
+
+        # --- Reset ---
+        frm_rst = ttk.Frame(nb)
+        nb.add(frm_rst, text="Reset Password")
+        ttk.Label(frm_rst, text="Email").grid(row=0, column=0, sticky="e", padx=6, pady=6)
+        self.rs_email = ttk.Entry(frm_rst, width=32)
+        self.rs_email.grid(row=0, column=1, padx=6, pady=6)
+        ttk.Button(frm_rst, text="Send Reset Link", command=self._do_send_reset).grid(row=1, column=0, columnspan=2, pady=8)
+
+        ttk.Separator(frm_rst).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6,4))
+        ttk.Label(frm_rst, text="Have a link? Paste token below").grid(row=3, column=0, columnspan=2)
+        ttk.Label(frm_rst, text="Token").grid(row=4, column=0, sticky="e", padx=6, pady=6)
+        ttk.Label(frm_rst, text="New Password").grid(row=5, column=0, sticky="e", padx=6, pady=6)
+        self.r_token = ttk.Entry(frm_rst, width=34)
+        self.r_newpw = ttk.Entry(frm_rst, show="*", width=34)
+        self.r_token.grid(row=4, column=1, padx=6, pady=6)
+        self.r_newpw.grid(row=5, column=1, padx=6, pady=6)
+        ttk.Button(frm_rst, text="Reset Password", command=self._do_finish_reset).grid(row=6, column=0, columnspan=2, pady=8)
+
+        self.bind("<Return>", lambda _e: self._do_sign_in())
+
+    def _do_sign_in(self):
+        e = (self.si_email.get() or "").strip().lower()
+        p = self.si_pass.get() or ""
+        if self.auth.authenticate(e, p):
+            self.result_email = e
+            self.destroy()
+        else:
+            messagebox.showerror("Sign In", "Invalid email or password.")
+
+    def _do_register(self):
+        e = (self.re_email.get() or "").strip().lower()
+        p = self.re_pass.get() or ""
+        c = self.re_conf.get() or ""
+        is_admin = bool(self.re_admin_var.get())
+        if p != c:
+            messagebox.showerror("Register", "Passwords do not match.")
+            return
+        ok, msg = self.auth.register(e, p, is_admin=is_admin)
+        if ok:
+            messagebox.showinfo("Register", msg)
+        else:
+            messagebox.showerror("Register", msg)
+
+    def _do_send_reset(self):
+        e = (self.rs_email.get() or "").strip().lower()
+        ok, msg = self.auth.start_reset(e)
+        if ok and "copied to clipboard" in msg:
+            copy_to_clipboard(self, msg.split(":")[-1].strip())
+        messagebox.showinfo("Reset", msg)
+
+    def _do_finish_reset(self):
+        e = (self.rs_email.get() or "").strip().lower()
+        t = (self.r_token.get() or "").strip()
+        n = self.r_newpw.get() or ""
+        ok, msg = self.auth.finish_reset(e, t, n)
+        if ok:
+            messagebox.showinfo("Reset", msg)
+        else:
+            messagebox.showerror("Reset", msg)
+
+# -------------------------------
+#            UI
+# -------------------------------
+
+class WeatherTab(ttk.Frame):
+    """
+    Weather tab with mini previews + Detect Location + Refresh.
+    """
+    def __init__(self, master, weather_client, books_client, catalog_mgr: CatalogManager):
+        super().__init__(master)
+        self.client = weather_client
+        self.books_client = books_client
+        self.catalog_mgr = catalog_mgr
+        self._icon_img = None
+
+        row = ttk.Frame(self)
+        row.pack(fill="x", padx=10, pady=(10, 6))
+        ttk.Label(row, text="City:").pack(side="left")
+        self.city_entry = ttk.Entry(row, width=28)
+        self.city_entry.pack(side="left", padx=(6, 6))
+        ttk.Button(row, text="Get Weather", command=self.fetch_weather).pack(side="left")
+        ttk.Button(row, text="Detect Location", command=self.detect_location).pack(side="left", padx=(6,0))
+        ttk.Button(row, text="Refresh", command=self.refresh_weather).pack(side="left", padx=(6,0))
+        ttk.Button(row, text="Use Result in Other Tabs", command=self.push_to_others).pack(side="left", padx=(8, 0))
+
+        self.info = tk.StringVar(value="Enter a city and click Get Weather.")
+        ttk.Label(self, textvariable=self.info, wraplength=520, justify="left").pack(anchor="w", padx=10, pady=6)
+
+        self.icon_label = ttk.Label(self); self.icon_label.pack(anchor="w", padx=10)
+
+        self.preview_frame = ttk.LabelFrame(self, text="Suggestions based on current weather")
+        self.preview_frame.pack(fill="x", padx=10, pady=(8, 10))
+        self.preview_frame.columnconfigure(0, weight=1)
+        self.preview_frame.columnconfigure(1, weight=1)
+        self.preview_frame.columnconfigure(2, weight=1)
+
+        ttk.Label(self.preview_frame, text="Comfort Food Ideas").grid(row=0, column=0, sticky="w", padx=6, pady=(6, 2))
+        self.food_list = tk.Listbox(self.preview_frame, height=5, exportselection=False)
+        self.food_list.grid(row=1, column=0, sticky="nsew", padx=6, pady=(0, 8))
+        ttk.Label(self.preview_frame, text="Book Suggestions").grid(row=0, column=1, sticky="w", padx=6, pady=(6, 2))
+        self.books_list = tk.Listbox(self.preview_frame, height=5, exportselection=False)
+        self.books_list.grid(row=1, column=1, sticky="nsew", padx=6, pady=(0, 8))
+        ttk.Label(self.preview_frame, text="Beverage Ideas").grid(row=0, column=2, sticky="w", padx=6, pady=(6, 2))
+        self.drinks_list = tk.Listbox(self.preview_frame, height=5, exportselection=False)
+        self.drinks_list.grid(row=1, column=2, sticky="nsew", padx=6, pady=(0, 8))
+
+        self.latest = None
+
+    def _threaded(self, fn):
+        t = threading.Thread(target=fn, daemon=True)
+        t.start()
+
+    def detect_location(self):
+        """Detect the user's location automatically using ipgeolocation.io (requires IPGEOLOCATION_API_KEY)."""
+        def work():
+            try:
+                api_key = os.getenv("IPGEOLOCATION_API_KEY")
+                if not api_key:
+                    messagebox.showerror(
+                        "Detect Location",
+                        "IPGEOLOCATION_API_KEY is not set.\n\nUse:\n  set IPGEOLOCATION_API_KEY=YOUR_KEY\nthen restart the terminal."
+                    )
+                    return
+
+                url = f"https://api.ipgeolocation.io/ipgeo?apiKey={api_key}"
+                response = requests.get(url, timeout=10)
+                if response.status_code == 200:
+                    data = response.json()
+                    city = (data.get("city") or "").strip()
+                    if city:
+                        # update input and fetch weather (keeps your existing flow unchanged)
+                        self.city_entry.delete(0, tk.END)
+                        self.city_entry.insert(0, city)
+                        self.fetch_weather()
+                    else:
+                        messagebox.showerror("Detect Location", "Could not detect city from location data.")
+                else:
+                    messagebox.showerror("Detect Location", "Could not detect location. Try again.")
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Network error during location detection: {e}")
+                messagebox.showerror("Detect Location", f"Network error: {e}")
+        self._threaded(work)
+
+    def refresh_weather(self):
+        if not self.city_entry.get().strip():
+            messagebox.showinfo("Refresh", "Enter a city or detect location first.")
+            return
+        self.fetch_weather()
+
+    def fetch_weather(self):
+        city = self.city_entry.get().strip()
+        if not city:
+            messagebox.showerror("Error", "Please enter a city.")
+            return
+
+        def work():
+            self.info.set("Fetching weather...")
+            data = self.client.current_by_city(city)
+            if "error" in data:
+                self.info.set(f"Error: {data['error']}")
+                self.icon_label.configure(image=""); self.icon_label.image = None
+                self.latest = None
+                self._clear_previews()
+                return
+
+            self.latest = data
+            txt = (f"{data['city']}: {data['description']}\n"
+                   f"Temperature: {data['temp_c']}°C (feels like {data['feels_like']}°C)\n"
+                   f"Humidity: {data['humidity']}%   Wind: {data['wind']} m/s")
+            self.info.set(txt)
+
+            try:
+                if data.get("icon"):
+                    icon_url = WeatherClient.icon_url(data["icon"])
+                    r = requests.get(icon_url, timeout=12); r.raise_for_status()
+                    img = Image.open(io.BytesIO(r.content)).resize((100, 100))
+                    self._icon_img = ImageTk.PhotoImage(img)
+                    self.icon_label.configure(image=self._icon_img); self.icon_label.image = self._icon_img
+                else:
+                    self.icon_label.configure(image=""); self.icon_label.image = None
+            except Exception as e:
+                logging.warning(f"Icon load failed: {e}")
+                self.icon_label.configure(image=""); self.icon_label.image = None
+
+            self._update_previews()
+
+        self._threaded(work)
+
+    def _clear_previews(self):
+        self.food_list.delete(0, tk.END)
+        self.books_list.delete(0, tk.END)
+        self.drinks_list.delete(0, tk.END)
+
+    def _update_previews(self):
+        self._clear_previews()
+        w = self.latest or {}
+        desc = w.get("description", "")
+        temp_c = w.get("temp_c")
+
+        catalogs = self.catalog_mgr.all()  # include admin-managed extras
+        for idea in mood_food_ideas(desc, temp_c, catalogs)[:5]:
+            self.food_list.insert(tk.END, f"• {idea}")
+        for idea in mood_drink_ideas(desc, temp_c, catalogs)[:5]:
+            self.drinks_list.insert(tk.END, f"• {idea}")
+
+        mood = derive_mood(desc, temp_c)
+        q = mood.get("book_query", "popular fiction")
+
+        def load_books():
+            self.books_list.insert(tk.END, "Loading…")
+            items = self.books_client.search(q, max_results=10, start_index=0)
+            self.books_list.delete(0, tk.END)
+            if not items:
+                self.books_list.insert(tk.END, "No suggestions found.")
+                # If admin added custom book names, show a couple of those as ideas:
+                for b in catalogs.get("books", [])[:3]:
+                    self.books_list.insert(tk.END, f"• {b}")
+                return
+            for it in items[:5]:
+                info = it.get("volumeInfo", {})
+                title = info.get("title", "Untitled")
+                self.books_list.insert(tk.END, f"• {title}")
+        self._threaded(load_books)
+
+    def push_to_others(self):
+        if not self.latest:
+            messagebox.showinfo("Info", "Get weather first.")
+            return
+        self.master.event_generate("<<WeatherUpdated>>", when="tail")
