@@ -895,3 +895,460 @@ class WeatherTab(ttk.Frame):
             messagebox.showinfo("Info", "Get weather first.")
             return
         self.master.event_generate("<<WeatherUpdated>>", when="tail")
+
+
+class RecipesTab(ttk.Frame):
+    """Comfort Food with ideas → recipes, plus Save Selected to History."""
+    def __init__(self, master, spoon_client, weather_tab, catalog_mgr: CatalogManager):
+        super().__init__(master)
+        self.client = spoon_client
+        self.weather_tab = weather_tab
+        self.catalog_mgr = catalog_mgr
+        self.items = []
+
+        top = ttk.Frame(self); top.pack(fill="x", padx=10, pady=(10, 6))
+        ttk.Label(top, text="Food keyword:").pack(side="left")
+        self.query_entry = ttk.Entry(top, width=24); self.query_entry.pack(side="left", padx=(6, 6))
+        ttk.Button(top, text="Search", command=self.search_direct).pack(side="left")
+        ttk.Button(top, text="Use Weather Mood", command=self.populate_ideas).pack(side="left", padx=(8, 0))
+        ttk.Button(top, text="Save Selected", command=self.save_selected).pack(side="left", padx=(8, 0))
+
+        body = ttk.Frame(self); body.pack(fill="both", expand=True, padx=10, pady=(6, 4))
+        left = ttk.Frame(body); left.pack(side="left", fill="both", expand=True)
+        ttk.Label(left, text="Food Ideas").pack(anchor="w")
+        self.ideas = tk.Listbox(left, height=12); self.ideas.pack(fill="both", expand=True)
+        self.ideas.bind("<Double-Button-1>", self._on_idea)
+
+        right = ttk.Frame(body); right.pack(side="left", fill="both", expand=True, padx=(10, 0))
+        ttk.Label(right, text="Recipes").pack(anchor="w")
+        self.results = tk.Listbox(right, height=12); self.results.pack(fill="both", expand=True)
+        self.results.bind("<Double-Button-1>", self.open_recipe)
+
+        self.status = tk.StringVar(value=""); ttk.Label(self, textvariable=self.status).pack(anchor="w", padx=10, pady=(4, 6))
+
+    def populate_ideas(self):
+        w = (self.weather_tab.latest or {})
+        ideas = mood_food_ideas(w.get("description", ""), w.get("temp_c"), self.catalog_mgr.all())
+        self.ideas.delete(0, tk.END)
+        for it in ideas: self.ideas.insert(tk.END, it)
+        self.status.set("Pick an idea to fetch recipes.")
+
+    def _on_idea(self, _evt=None):
+        sel = self.ideas.curselection()
+        if not sel: return
+        idea = self.ideas.get(sel[0]); self.search_for(idea)
+
+    def search_direct(self):
+        q = self.query_entry.get().strip() or "comfort food"; self.search_for(q)
+
+    def search_for(self, query: str):
+        self.results.delete(0, tk.END); self.items = []; self.status.set(f"Searching recipes for: {query}")
+        def work():
+            data = self.client.search(query, number=12)
+            self.items = data or []
+            if not self.items:
+                self.results.insert(tk.END, "No recipes found."); self.status.set("No recipes found."); return
+            for i, rcp in enumerate(self.items, start=1):
+                title = rcp.get("title", "Recipe"); ready = rcp.get("readyInMinutes"); servings = rcp.get("servings")
+                self.results.insert(tk.END, f"{i}. {title} • {ready} min • serves {servings}")
+            self.status.set(f"Found {len(self.items)} recipes for '{query}'.")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _try_open_url(self, url: str) -> bool:
+        if not url: return False
+        try:
+            r = requests.get(url, timeout=6, allow_redirects=True)
+            if r.status_code and r.status_code < 400:
+                webbrowser.open(url); return True
+            return False
+        except Exception:
+            return False
+
+    def open_recipe(self, _evt=None):
+        sel = self.results.curselection()
+        if not sel or not self.items: return
+        idx = sel[0]; item = self.items[idx]
+        spoon_url = item.get("spoonacularSourceUrl"); src_url = item.get("sourceUrl")
+        if self._try_open_url(spoon_url): return
+        if self._try_open_url(src_url): return
+        rid = item.get("id")
+        if not rid:
+            messagebox.showinfo("Recipe", "This recipe has no details link. Try another result."); return
+        try:
+            info_url = f"https://api.spoonacular.com/recipes/{rid}/information"
+            params = {"apiKey": self.client.api_key, "includeNutrition": "false"}
+            r = requests.get(info_url, params=params, timeout=10); r.raise_for_status()
+            info = r.json(); title = info.get("title", "Recipe")
+            ings = []
+            for ing in info.get("extendedIngredients", []) or []:
+                amount = []
+                if ing.get("amount"): amount.append(str(ing["amount"]))
+                if ing.get("unit"): amount.append(ing["unit"])
+                amt = (" ".join(amount)).strip(); name = (ing.get("name") or "").strip()
+                ings.append(f"{amt} {name}".strip() if amt else name)
+            steps_text = "No instructions provided."
+            analyzed = info.get("analyzedInstructions") or []; steps=[]
+            for block in analyzed:
+                for step in block.get("steps", []):
+                    txt = (step.get("step") or "").strip()
+                    if txt: steps.append(txt)
+            if steps: steps_text = "\n".join([f"{i+1}. {s}" for i, s in enumerate(steps)])
+            popup = f"{title}\n\nIngredients:\n- " + "\n- ".join(ings) + f"\n\nInstructions:\n{steps_text}"
+            live_url = info.get("spoonacularSourceUrl") or info.get("sourceUrl")
+            if live_url:
+                archive_link = f"https://web.archive.org/web/*/{live_url}"
+                popup += f"\n\nIf the original page is down, try Archive.org:\n{archive_link}"
+            messagebox.showinfo("Recipe", popup)
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Error fetching recipe details: {e}")
+            messagebox.showerror("Recipe", "Could not load recipe details. Please try another result.")
+
+    def save_selected(self):
+        sel = self.results.curselection()
+        if not sel or not self.items:
+            messagebox.showinfo("History", "Select a recipe first."); return
+        idx = sel[0]; item = self.items[idx]
+        label = item.get("title") or "Recipe"
+        metadata = {"source": "spoonacular", "id": item.get("id"), "url": item.get("sourceUrl")}
+        app = self.winfo_toplevel()
+        weather = getattr(app, "last_weather_snapshot", {})
+        app.history.add("food", label, metadata, weather)
+        # NEW: Immediate refresh of History tab
+        app.tab_history.refresh()
+        messagebox.showinfo("History", f"Saved to history:\n{label}")
+
+class BooksTab(ttk.Frame):
+    DECADES = ["Any", "1950s", "1960s", "1970s", "1980s", "1990s", "2000s", "2010s", "2020s"]
+    def __init__(self, master, gb_client, weather_tab, catalog_mgr: CatalogManager):
+        super().__init__(master)
+        self.client = gb_client
+        self.weather_tab = weather_tab
+        self.catalog_mgr = catalog_mgr
+        self.last_query = None
+        self.items: List[Dict] = []
+
+        row = ttk.Frame(self); row.pack(fill="x", padx=10, pady=(10, 6))
+        ttk.Label(row, text="Book keyword/genre:").pack(side="left")
+        self.query_entry = ttk.Entry(row, width=28); self.query_entry.pack(side="left", padx=(6, 6))
+        ttk.Button(row, text="Search", command=self.search).pack(side="left")
+        ttk.Button(row, text="Use Weather Mood", command=self.use_mood).pack(side="left", padx=(8, 0))
+        ttk.Button(row, text="Shuffle", command=self.shuffle).pack(side="left", padx=(8, 0))
+        ttk.Button(row, text="Save Selected", command=self.save_selected).pack(side="left", padx=(8, 0))
+
+        ttk.Label(row, text="Decade:").pack(side="left", padx=(10, 4))
+        self.decade_var = tk.StringVar(value="Any")
+        self.decade_box = ttk.Combobox(row, textvariable=self.decade_var, state="readonly",
+                                       values=self.DECADES, width=10)
+        self.decade_box.pack(side="left")
+        self.decade_box.bind("<<ComboboxSelected>>", lambda _e: self.search())
+
+        self.results = tk.Listbox(self, height=12)
+        self.results.pack(fill="both", expand=True, padx=10, pady=(6, 4))
+        self.results.bind("<Double-Button-1>", self.open_google_books)
+
+    def _parse_year(self, date_str: str) -> Optional[int]:
+        if not date_str: return None
+        m = re.match(r"(\d{4})", date_str); return int(m.group(1)) if m else None
+
+    def _decade_bounds(self, decade_label: str) -> Tuple[Optional[int], Optional[int]]:
+        if decade_label == "Any": return None, None
+        start = int(decade_label[:4]); return start, start + 9
+
+    def _filter_by_decade(self, items: List[Dict], decade_label: str) -> List[Dict]:
+        lo, hi = self._decade_bounds(decade_label)
+        if lo is None: return items
+        out = []
+        for it in items:
+            info = it.get("volumeInfo", {})
+            yr = self._parse_year(info.get("publishedDate", "")) or None
+            if yr is not None and lo <= yr <= hi:
+                out.append(it)
+        return out
+
+    def use_mood(self):
+        w = (self.weather_tab.latest or {})
+        mood = derive_mood(w.get("description", ""), w.get("temp_c"))
+        self.query_entry.delete(0, tk.END); self.query_entry.insert(0, mood["book_query"])
+        self.decade_var.set("Any"); self.search()
+
+    def shuffle(self):
+        q = self.query_entry.get().strip() or "popular fiction"
+        self._search_internal(q, start_index=random.choice([0, 20, 40, 60, 80]))
+
+    def search(self):
+        q = self.query_entry.get().strip() or "popular fiction"
+        start_index = random.choice([0, 10, 20, 30, 40]) if q == self.last_query else 0
+        self.last_query = q
+        self._search_internal(q, start_index=start_index)
+
+    def _search_internal(self, q: str, start_index: int = 0):
+        self.results.delete(0, tk.END)
+        def work():
+            items = self.client.search(q, max_results=20, start_index=start_index)
+            items = self._filter_by_decade(items, self.decade_var.get())
+            self.items = items or []
+            if not self.items:
+                self.results.insert(tk.END, "No books found. Try Shuffle or a different decade.")
+                # Also surface admin-provided static suggestions if any
+                for b in self.catalog_mgr.all().get("books", [])[:5]:
+                    self.results.insert(tk.END, f"• {b}")
+                return
+            for i, it in enumerate(self.items, start=1):
+                info = it.get("volumeInfo", {})
+                title = info.get("title", "Untitled")
+                authors = ", ".join(info.get("authors", [])[:2]) if info.get("authors") else "Unknown"
+                year = self._parse_year(info.get("publishedDate", "")) or ""
+                self.results.insert(tk.END, f"{i}. {title} — {authors} ({year})")
+        threading.Thread(target=work, daemon=True).start()
+
+    def open_google_books(self, _evt=None):
+        sel = self.results.curselection()
+        if not sel or not self.items: return
+        idx = sel[0]; item = self.items[idx]
+        info = item.get("volumeInfo", {})
+        url = info.get("infoLink") or info.get("canonicalVolumeLink")
+        if url: webbrowser.open(url)
+
+    def save_selected(self):
+        sel = self.results.curselection()
+        if not sel:
+            messagebox.showinfo("History", "Select a book first."); return
+        idx = sel[0]
+        label = None
+        metadata = {}
+        # If user picked an API item, save its fields; if they clicked a catalog bullet, save as plain label.
+        if self.items and idx < len(self.items):
+            it = self.items[idx]; info = it.get("volumeInfo", {})
+            label = info.get("title") or "Book"
+            metadata = {"source": "google_books", "id": it.get("id"), "infoLink": info.get("infoLink")}
+        else:
+            label = self.results.get(idx).lstrip("• ").strip()
+
+        app = self.winfo_toplevel()
+        weather = getattr(app, "last_weather_snapshot", {})
+        app.history.add("book", label, metadata, weather)
+        app.tab_history.refresh()  # NEW: instant refresh
+        messagebox.showinfo("History", f"Saved to history:\n{label}")
+
+class CocktailsTab(ttk.Frame):
+    """Beverages with ideas → results, filter + Save Selected."""
+    def __init__(self, master, c_client, weather_tab, catalog_mgr: CatalogManager):
+        super().__init__(master)
+        self.client = c_client
+        self.weather_tab = weather_tab
+        self.catalog_mgr = catalog_mgr
+        self.items: List[Dict] = []
+
+        row = ttk.Frame(self); row.pack(fill="x", padx=10, pady=(10, 6))
+        ttk.Label(row, text="Drink keyword:").pack(side="left")
+        self.query_entry = ttk.Entry(row, width=24); self.query_entry.pack(side="left", padx=(6, 6))
+        ttk.Button(row, text="Search", command=self.search_direct).pack(side="left")
+        ttk.Button(row, text="Use Weather Mood", command=self.populate_ideas).pack(side="left", padx=(8, 0))
+        ttk.Button(row, text="Save Selected", command=self.save_selected).pack(side="left", padx=(8, 0))
+
+        ttk.Label(row, text="Filter:").pack(side="left", padx=(10, 4))
+        self.filter_var = tk.StringVar(value="All")
+        self.filter_box = ttk.Combobox(row, textvariable=self.filter_var, state="readonly",
+                                       values=["All", "Non-Alcoholic", "Alcoholic"], width=15)
+        self.filter_box.pack(side="left")
+        self.filter_box.bind("<<ComboboxSelected>>", lambda _e: self._reapply_filter())
+
+        body = ttk.Frame(self); body.pack(fill="both", expand=True, padx=10, pady=(6, 4))
+        left = ttk.Frame(body); left.pack(side="left", fill="both", expand=True)
+        ttk.Label(left, text="Drink Ideas").pack(anchor="w")
+        self.ideas = tk.Listbox(left, height=12); self.ideas.pack(fill="both", expand=True)
+        self.ideas.bind("<Double-Button-1>", self._on_idea)
+
+        right = ttk.Frame(body); right.pack(side="left", fill="both", expand=True, padx=(10, 0))
+        ttk.Label(right, text="Results").pack(anchor="w")
+        self.results = tk.Listbox(right, height=12); self.results.pack(fill="both", expand=True)
+        self.results.bind("<Double-Button-1>", self.open_cocktail_page)
+
+    def populate_ideas(self):
+        w = (self.weather_tab.latest or {})
+        ideas = mood_drink_ideas(w.get("description", ""), w.get("temp_c"), self.catalog_mgr.all())
+        self.ideas.delete(0, tk.END)
+        for it in ideas: self.ideas.insert(tk.END, it)
+
+    def _on_idea(self, _evt=None):
+        sel = self.ideas.curselection()
+        if not sel: return
+        idea = self.ideas.get(sel[0]); self.search_for_idea(idea)
+
+    def search_direct(self):
+        q = self.query_entry.get().strip()
+        if not q:
+            messagebox.showinfo("Info", "Enter a drink keyword or use Weather Mood."); return
+        self._search_drinks(q)
+
+    def search_for_idea(self, idea_label: str):
+        m = re.match(r"^(\w+)\s+drinks$", idea_label.strip(), re.IGNORECASE)
+        if m:
+            ingredient = m.group(1); self._search_drinks_by_ingredient(ingredient)
+        else:
+            self._search_drinks(idea_label)
+
+    def _search_drinks_by_ingredient(self, ingredient: str):
+        self.results.delete(0, tk.END); self.items = []
+        def work():
+            base = self.client.filter_by_ingredient(ingredient)
+            enriched = []
+            for d in base[:40]:
+                info = self.client.lookup_by_id(d.get("idDrink"))
+                if info: enriched.append(info)
+            self.items = self._apply_filter(enriched)
+            if not self.items:
+                self.results.insert(tk.END, "No drinks found."); return
+            for i, d in enumerate(self.items[:50], start=1):
+                name = d.get("strDrink", "Drink"); alc = d.get("strAlcoholic", "")
+                self.results.insert(tk.END, f"{i}. {name} • {alc or 'Unknown'}")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _search_drinks(self, query: str):
+        self.results.delete(0, tk.END); self.items = []
+        def work():
+            drinks = self.client.search_by_name(query) or []
+            if len(drinks) < 3:
+                fallback = self.client.filter_by_ingredient(query.split()[0])
+                for d in fallback[:30]:
+                    info = self.client.lookup_by_id(d.get("idDrink"))
+                    if info: drinks.append(info)
+            drinks = self._apply_filter(drinks); self.items = drinks or []
+            if not self.items:
+                self.results.insert(tk.END, "No drinks found."); return
+            for i, d in enumerate(self.items[:50], start=1):
+                name = d.get("strDrink", "Drink"); alc = d.get("strAlcoholic", "")
+                self.results.insert(tk.END, f"{i}. {name} • {alc or 'Unknown'}")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _apply_filter(self, drinks: List[Dict]) -> List[Dict]:
+        mode = self.filter_var.get()
+        if mode == "All": return drinks
+        target = "Non alcoholic" if mode == "Non-Alcoholic" else "Alcoholic"
+        out = [d for d in drinks if (d.get("strAlcoholic") or "").lower() == target.lower()]
+        if any(d.get("strAlcoholic") is None for d in drinks):
+            enriched = []
+            for d in drinks:
+                if d.get("strAlcoholic") is None and d.get("idDrink"):
+                    info = self.client.lookup_by_id(d["idDrink"])
+                    if info: enriched.append(info)
+                else:
+                    enriched.append(d)
+            out = [d for d in enriched if (d.get("strAlcoholic") or "").lower() == target.lower()]
+        return out
+
+    def _reapply_filter(self):
+        if not self.items: return
+        filtered = self._apply_filter(self.items)
+        self.results.delete(0, tk.END)
+        if not filtered:
+            self.results.insert(tk.END, "No drinks match the filter."); return
+        self.items = filtered
+        for i, d in enumerate(self.items[:50], start=1):
+            name = d.get("strDrink", "Drink"); alc = d.get("strAlcoholic", "")
+            self.results.insert(tk.END, f"{i}. {name} • {alc or 'Unknown'}")
+
+    def open_cocktail_page(self, _evt=None):
+        sel = self.results.curselection()
+        if not sel or not self.items: return
+        idx = sel[0]; drink = self.items[idx]
+        if not drink.get("strInstructions"):
+            enriched = self.client.lookup_by_id(drink.get("idDrink"))
+            if enriched: drink = enriched
+        name = drink.get("strDrink", "Drink")
+        instructions = drink.get("strInstructions", "No instructions.")
+        ings = []
+        for n in range(1, 16):
+            ing = drink.get(f"strIngredient{n}"); mea = drink.get(f"strMeasure{n}")
+            if ing:
+                ings.append(f"{(mea or '').strip()} {ing.strip()}".strip())
+        txt = f"{name}\n\nIngredients:\n- " + "\n- ".join(ings) + f"\n\nInstructions:\n{instructions}"
+        messagebox.showinfo("Drink Recipe", txt)
+
+    def save_selected(self):
+        sel = self.results.curselection()
+        if not sel or not self.items:
+            messagebox.showinfo("History", "Select a drink first."); return
+        idx = sel[0]; d = self.items[idx]
+        label = d.get("strDrink") or "Drink"
+        metadata = {"source": "cocktaildb", "idDrink": d.get("idDrink"), "alcoholic": d.get("strAlcoholic")}
+        app = self.winfo_toplevel()
+        weather = getattr(app, "last_weather_snapshot", {})
+        app.history.add("drink", label, metadata, weather)
+        app.tab_history.refresh()  # NEW: instant refresh
+        messagebox.showinfo("History", f"Saved to history:\n{label}")
+
+class HistoryTab(ttk.Frame):
+    """View / delete / export history."""
+    def __init__(self, master, history: HistoryManager):
+        super().__init__(master)
+        self.history = history
+
+        top = ttk.Frame(self); top.pack(fill="x", padx=10, pady=(10, 6))
+        ttk.Button(top, text="Delete Selected", command=self.delete_selected).pack(side="left")
+        ttk.Button(top, text="Export Selected (CSV)", command=lambda: self.export_selected(fmt="csv")).pack(side="left", padx=6)
+        ttk.Button(top, text="Export Selected (JSON)", command=lambda: self.export_selected(fmt="json")).pack(side="left", padx=6)
+        ttk.Button(top, text="Export All (CSV)", command=lambda: self.export_all(fmt="csv")).pack(side="left", padx=6)
+        ttk.Button(top, text="Export All (JSON)", command=lambda: self.export_all(fmt="json")).pack(side="left", padx=6)
+
+        self.tree = ttk.Treeview(self, columns=("time","type","label","weather"), show="headings", height=14)
+        self.tree.pack(fill="both", expand=True, padx=10, pady=(4, 10))
+        for c in ("time","type","label","weather"):
+            self.tree.heading(c, text=c.capitalize())
+        self.tree.column("time", width=160)
+        self.tree.column("type", width=80)
+        self.tree.column("label", width=260)
+        self.tree.column("weather", width=340)
+        self.refresh()
+
+    def refresh(self):
+        for i in self.tree.get_children():
+            self.tree.delete(i)
+        for idx, it in enumerate(self.history.items):
+            w = it.get("weather") or {}
+            wtxt = f"{w.get('city','')} • {w.get('description','')} • {w.get('temp_c','')}°C"
+            self.tree.insert("", "end", iid=str(idx), values=(it["timestamp"], it["type"], it["label"], wtxt))
+
+    def selected_indices(self) -> List[int]:
+        return [int(iid) for iid in self.tree.selection()]
+
+    def delete_selected(self):
+        idxs = sorted(self.selected_indices(), reverse=True)
+        if not idxs:
+            messagebox.showinfo("History", "Select rows to delete."); return
+        for i in idxs:
+            self.history.delete_index(i)
+        self.refresh()
+
+    def export_selected(self, fmt="csv"):
+        idxs = self.selected_indices()
+        if not idxs:
+            messagebox.showinfo("Export", "Select rows to export."); return
+        path = filedialog.asksaveasfilename(
+            defaultextension=f".{fmt}",
+            filetypes=[("CSV","*.csv"),("JSON","*.json"),("All","*.*")]
+        )
+        if not path: return
+        try:
+            if fmt == "csv":
+                self.history.export_csv(path, selection=idxs)
+            else:
+                self.history.export_json(path, selection=idxs)
+            messagebox.showinfo("Export", f"Exported {len(idxs)} items to {os.path.basename(path)}")
+        except Exception as e:
+            logging.error(e); messagebox.showerror("Export", "Failed to export.")
+
+    def export_all(self, fmt="csv"):
+        path = filedialog.asksaveasfilename(
+            defaultextension=f".{fmt}",
+            filetypes=[("CSV","*.csv"),("JSON","*.json"),("All","*.*")]
+        )
+        if not path: return
+        try:
+            if fmt == "csv":
+                self.history.export_csv(path, selection=None)
+            else:
+                self.history.export_json(path, selection=None)
+            messagebox.showinfo("Export", f"Exported all history to {os.path.basename(path)}")
+        except Exception as e:
+            logging.error(e); messagebox.showerror("Export", "Failed to export.")
