@@ -1352,3 +1352,283 @@ class HistoryTab(ttk.Frame):
             messagebox.showinfo("Export", f"Exported all history to {os.path.basename(path)}")
         except Exception as e:
             logging.error(e); messagebox.showerror("Export", "Failed to export.")
+
+# -------------------------------
+#        NEW: User Tab
+# -------------------------------
+
+class UserTab(ttk.Frame):
+    """
+    Provides Change Password / Delete Account / Sign Out actions.
+    """
+    def __init__(self, master, app_ref):
+        super().__init__(master)
+        self.app = app_ref
+
+        box = ttk.LabelFrame(self, text="Account")
+        box.pack(fill="x", padx=12, pady=12)
+
+        ttk.Label(box, text=f"Logged in as: {self.app.current_user}").grid(row=0, column=0, columnspan=3, sticky="w", padx=8, pady=(8, 4))
+
+        ttk.Label(box, text="Current Password").grid(row=1, column=0, sticky="e", padx=8, pady=4)
+        ttk.Label(box, text="New Password").grid(row=2, column=0, sticky="e", padx=8, pady=4)
+        ttk.Label(box, text="Confirm New").grid(row=3, column=0, sticky="e", padx=8, pady=4)
+
+        self.curr_pw = ttk.Entry(box, show="*", width=28); self.curr_pw.grid(row=1, column=1, padx=8, pady=4)
+        self.new_pw  = ttk.Entry(box, show="*", width=28); self.new_pw.grid(row=2, column=1, padx=8, pady=4)
+        self.conf_pw = ttk.Entry(box, show="*", width=28); self.conf_pw.grid(row=3, column=1, padx=8, pady=4)
+
+        ttk.Button(box, text="Change Password", command=self._change_password).grid(row=4, column=0, columnspan=2, padx=8, pady=8, sticky="w")
+
+        sep = ttk.Separator(self); sep.pack(fill="x", padx=12, pady=8)
+
+        row2 = ttk.Frame(self); row2.pack(fill="x", padx=12, pady=(0,12))
+        ttk.Button(row2, text="Sign Out", command=self.app._sign_out).pack(side="left")
+        ttk.Button(row2, text="Delete Account", command=self.app._delete_account).pack(side="left", padx=8)
+
+    def _change_password(self):
+        cur = self.curr_pw.get() or ""
+        new = self.new_pw.get() or ""
+        conf = self.conf_pw.get() or ""
+        if new != conf:
+            messagebox.showerror("Change Password", "New passwords do not match.")
+            return
+        ok, msg = self.app.auth.change_password(self.app.current_user, cur, new)
+        if ok:
+            messagebox.showinfo("Change Password", msg)
+            self.curr_pw.delete(0, tk.END); self.new_pw.delete(0, tk.END); self.conf_pw.delete(0, tk.END)
+        else:
+            messagebox.showerror("Change Password", msg)
+
+# -------------------------------
+#      NEW: Admin Panel Tab
+# -------------------------------
+
+class AdminPanel(ttk.Frame):
+    """
+    Simple CRUD UI for catalogs (foods / beverages / books).
+    Visible only when logged-in user is admin.
+    """
+    def __init__(self, master, catalog_mgr: CatalogManager):
+        super().__init__(master)
+        self.catalog_mgr = catalog_mgr
+
+        self._make_section("Foods", "foods", 0)
+        self._make_section("Beverages", "beverages", 1)
+        self._make_section("Books", "books", 2)
+
+        tip = ttk.Label(self, text="Tips: Double-click an item to edit. Select and press Delete to remove.",
+                        foreground="#555")
+        tip.grid(row=3, column=0, columnspan=3, sticky="w", padx=12, pady=(4,12))
+
+    def _make_section(self, title: str, category: str, row_index: int):
+        box = ttk.LabelFrame(self, text=title)
+        box.grid(row=row_index, column=0, sticky="nsew", padx=12, pady=8)
+        box.columnconfigure(0, weight=1)
+
+        lst = tk.Listbox(box, height=10)
+        lst.grid(row=0, column=0, columnspan=3, sticky="nsew", padx=8, pady=6)
+        self._populate_list(lst, category)
+
+        ent = ttk.Entry(box, width=36)
+        ent.grid(row=1, column=0, sticky="w", padx=8, pady=(0,8))
+
+        def add_item():
+            val = ent.get().strip()
+            if not val: return
+            if self.catalog_mgr.add_item(category, val):
+                self._populate_list(lst, category)
+                ent.delete(0, tk.END)
+            else:
+                messagebox.showerror("Catalog", "Failed to add item (maybe duplicate).")
+
+        def on_edit(_evt=None):
+            sel = lst.curselection()
+            if not sel: return
+            old = lst.get(sel[0])
+            new = tk.simpledialog.askstring("Edit Item", f"Edit {title[:-1]}:", initialvalue=old)
+            if new and new.strip():
+                if self.catalog_mgr.edit_item(category, old, new.strip()):
+                    self._populate_list(lst, category)
+                else:
+                    messagebox.showerror("Catalog", "Failed to edit item.")
+
+        def on_delete():
+            sel = lst.curselection()
+            if not sel: return
+            val = lst.get(sel[0])
+            if messagebox.askyesno("Delete", f"Delete '{val}'?"):
+                if self.catalog_mgr.delete_item(category, val):
+                    self._populate_list(lst, category)
+                else:
+                    messagebox.showerror("Catalog", "Failed to delete item.")
+
+        ttk.Button(box, text="Add", command=add_item).grid(row=1, column=1, sticky="w", padx=(4,8), pady=(0,8))
+        ttk.Button(box, text="Delete Selected", command=on_delete).grid(row=1, column=2, sticky="e", padx=8, pady=(0,8))
+
+        lst.bind("<Double-Button-1>", on_edit)
+        lst.bind("<Delete>", lambda _e: on_delete())
+
+    def _populate_list(self, lst: tk.Listbox, cat: str):
+        lst.delete(0, tk.END)
+        for v in self.catalog_mgr.all().get(cat, []):
+            lst.insert(tk.END, v)
+
+# -------------------------------
+#             App
+# -------------------------------
+
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Weather-Based Comfort Food + Beverage + Book Recommender")
+        self.geometry("1120x780")
+
+        # --- Auth gate ---
+        self.auth = AuthManager()
+        self.current_user: Optional[str] = None
+        self.history: Optional[HistoryManager] = None
+        self.last_weather_snapshot: Dict = {}
+
+        # Admin notifier (pass a callable returning self to avoid early binding issues)
+        self.notifier = AdminNotifier(lambda: self)
+
+        self._run_login_flow()
+        if not self.current_user:
+            self.destroy(); return
+
+        # --- API Keys (prefer env vars) ---
+        openweather_key = os.getenv("OPENWEATHER_API_KEY", "YOUR_OPENWEATHER_API_KEY")
+        spoonacular_key = os.getenv("SPOONACULAR_API_KEY", "YOUR_SPOONACULAR_API_KEY")
+        google_books_key = os.getenv("GOOGLE_BOOKS_API_KEY", "YOUR_GOOGLE_BOOKS_API_KEY")
+
+        if not openweather_key or openweather_key == "YOUR_OPENWEATHER_API_KEY":
+            logging.warning("Set OPENWEATHER_API_KEY environment variable or edit the file.")
+        if not spoonacular_key or spoonacular_key == "YOUR_SPOONACULAR_API_KEY":
+            logging.warning("Set SPOONACULAR_API_KEY environment variable or edit the file.")
+        if not google_books_key:
+            logging.warning("Set GOOGLE_BOOKS_API_KEY environment variable or edit the file.")
+            logging.error("GOOGLE_BOOKS_API_KEY is not set. Use `set GOOGLE_BOOKS_API_KEY=...` and restart the terminal.")
+            messagebox.showerror("Missing Key", "Please set GOOGLE_BOOKS_API_KEY in your environment and relaunch.")
+            google_books_key = ""
+
+        # Clients
+        self.catalogs = CatalogManager(CATALOGS_PATH, notifier=self.notifier)  # NEW
+        self.weather_client = WeatherClient(openweather_key, notifier=self.notifier)  # NEW: notifier
+        self.spoon_client = SpoonacularClient(spoonacular_key)
+        self.gb_client = GoogleBooksClient(google_books_key)
+        self.cocktail_client = CocktailDBClient()
+
+        # History for logged user
+        self.history = HistoryManager(self.current_user)
+
+        # Menu (Account)
+        self._build_menu()
+
+        # Tabs
+        self.notebook = ttk.Notebook(self); self.notebook.pack(fill="both", expand=True)
+
+        # NEW: User tab (account management)
+        self.tab_user = UserTab(self.notebook, self)
+
+        self.tab_weather = WeatherTab(self.notebook, self.weather_client, self.gb_client, self.catalogs)
+        self.tab_recipes = RecipesTab(self.notebook, self.spoon_client, self.tab_weather, self.catalogs)
+        self.tab_books = BooksTab(self.notebook, self.gb_client, self.tab_weather, self.catalogs)
+        self.tab_cocktails = CocktailsTab(self.notebook, self.cocktail_client, self.tab_weather, self.catalogs)
+        self.tab_history = HistoryTab(self.notebook, self.history)
+
+        # Order tabs with User first for easy access
+        self.notebook.add(self.tab_user, text="User")
+        self.notebook.add(self.tab_weather, text="Weather")
+        self.notebook.add(self.tab_recipes, text="Comfort Food")
+        self.notebook.add(self.tab_books, text="Books")
+        self.notebook.add(self.tab_cocktails, text="Beverages")
+        self.notebook.add(self.tab_history, text="History")
+
+        # Admin panel tab (only if admin)
+        if self.auth.is_admin(self.current_user):
+            self.tab_admin = AdminPanel(self.notebook, self.catalogs)
+            self.notebook.add(self.tab_admin, text="Admin Panel")
+
+        # Capture weather snapshots to attach to history
+        self.bind("<<WeatherUpdated>>", self.on_weather_updated)
+
+        # Footer
+        footer = ttk.Frame(self); footer.pack(fill="x")
+        role = "Admin" if self.auth.is_admin(self.current_user) else "User"
+        ttk.Label(footer, text=f"Logged in as: {self.current_user} ({role})").pack(side="left", padx=10, pady=6)
+        ttk.Label(footer, text="Tip: Get weather, then use 'Use Weather Mood' in the other tabs.").pack(
+            side="left", padx=10, pady=6
+        )
+        ttk.Button(footer, text="About APIs", command=self.show_api_info).pack(side="right", padx=10)
+
+    # ---- Auth flow helpers ----
+    def _run_login_flow(self):
+        dlg = LoginDialog(self, self.auth)
+        self.wait_window(dlg)
+        self.current_user = dlg.result_email
+        if self.current_user:
+            self.history = HistoryManager(self.current_user)
+
+    def _build_menu(self):
+        menubar = tk.Menu(self)
+        acc = tk.Menu(menubar, tearoff=0)
+        notify_var = tk.BooleanVar(value=self.auth.get_notify(self.current_user))
+        def toggle_notify():
+            self.auth.set_notify(self.current_user, notify_var.get())
+            messagebox.showinfo("Notifications", f"Notifications preference set to {notify_var.get()}")
+        acc.add_checkbutton(label="Receive Notifications (Admin alerts)", variable=notify_var, command=toggle_notify)
+        acc.add_separator()
+        acc.add_command(label="Sign Out", command=self._sign_out)
+        acc.add_command(label="Delete Account", command=self._delete_account)
+        menubar.add_cascade(label="Account", menu=acc)
+        self.config(menu=menubar)
+
+    def _sign_out(self):
+        if messagebox.askyesno("Sign Out", "Sign out now?"):
+            self.destroy()
+            # Relaunch a fresh app instance
+            root = App(); root.mainloop()
+
+    def _delete_account(self):
+        if messagebox.askyesno("Delete Account", "This will delete your account and history. Continue?"):
+            if self.auth.delete_account(self.current_user):
+                messagebox.showinfo("Account", "Account deleted.")
+                self.destroy()
+                root = App(); root.mainloop()
+            else:
+                messagebox.showerror("Account", "Failed to delete account.")
+
+    # ---- Events ----
+    def on_weather_updated(self, _evt=None):
+        # Snapshot latest weather for history entries
+        w = self.tab_weather.latest or {}
+        if w:
+            self.last_weather_snapshot = {
+                "city": w.get("city"),
+                "description": w.get("description"),
+                "temp_c": w.get("temp_c"),
+                "feels_like": w.get("feels_like"),
+                "humidity": w.get("humidity"),
+                "wind": w.get("wind"),
+                "captured_at": now_iso(),
+            }
+        # Refresh History tab view so recent saves show up quickly (if any)
+        self.tab_history.refresh()
+
+    def show_api_info(self):
+        info = (
+            "APIs used:\n"
+            "• OpenWeatherMap – current weather & icons\n"
+            "• Spoonacular – recipes with details & links\n"
+            "• Google Books – book search (with decade filter)\n"
+            "• TheCocktailDB – alcoholic & non-alcoholic drinks\n\n"
+            "Local catalogs (Admin): catalogs.json (foods, beverages, books)\n\n"
+            "Env vars (optional):\n"
+            "  OPENWEATHER_API_KEY, SPOONACULAR_API_KEY, GOOGLE_BOOKS_API_KEY\n"
+            "  SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, SMTP_FROM (for password reset email)\n"
+        )
+        messagebox.showinfo("APIs", info)
+
+if __name__ == "__main__":
+    App().mainloop()
