@@ -92,26 +92,26 @@
 #### 5.2 Windows (Command Prompt)
 
 - **Run these in the same terminal after activating the venv:**
-  - `set OPENWEATHER_API_KEY=1517def1af3a3337eebc71f01ab4e0a8`
-  - `set SPOONACULAR_API_KEY=fb3b3454b6c540b7b8b9edfb4d492d46`
-  - `set GOOGLE_BOOKS_API_KEY=AIzaSyD275C7Sut00hyeRrAtIqh2p4UrRB84MxU`
-  - `set IPGEOLOCATION_API_KEY=09dda02a9e3d4df8b9ab07321efa123d`
+  - `set OPENWEATHER_API_KEY=`
+  - `set SPOONACULAR_API_KEY=`
+  - `set GOOGLE_BOOKS_API_KEY=`
+  - `set IPGEOLOCATION_API_KEY=`
 
 #### 5.3 Windows (PowerShell)
 
 - **Run these after activating the venv:**
-  - `$env:OPENWEATHER_API_KEY="1517def1af3a3337eebc71f01ab4e0a8"`
-  - `$env:SPOONACULAR_API_KEY="fb3b3454b6c540b7b8b9edfb4d492d46"`
-  - `$env:GOOGLE_BOOKS_API_KEY="AIzaSyD275C7Sut00hyeRrAtIqh2p4UrRB84MxU"`
-  - `$env:IPGEOLOCATION_API_KEY="09dda02a9e3d4df8b9ab07321efa123d"`
+  - `$env:OPENWEATHER_API_KEY=""`
+  - `$env:SPOONACULAR_API_KEY=""`
+  - `$env:GOOGLE_BOOKS_API_KEY=""`
+  - `$env:IPGEOLOCATION_API_KEY=""`
 
 #### 5.4 macOS / Linux
 
 - **Run these in your shell (bash / zsh / similar):**
-  - `export OPENWEATHER_API_KEY=1517def1af3a3337eebc71f01ab4e0a8`
-  - `export SPOONACULAR_API_KEY=fb3b3454b6c540b7b8b9edfb4d492d46`
-  - `export GOOGLE_BOOKS_API_KEY=AIzaSyD275C7Sut00hyeRrAtIqh2p4UrRB84MxU`
-  - `export IPGEOLOCATION_API_KEY=09dda02a9e3d4df8b9ab07321efa123d`
+  - `export OPENWEATHER_API_KEY=`
+  - `export SPOONACULAR_API_KEY=`
+  - `export GOOGLE_BOOKS_API_KEY=`
+  - `export IPGEOLOCATION_API_KEY=`
 
 #### 5.5 Updating Keys Later
 
