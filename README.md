@@ -124,7 +124,7 @@
 #### 6.1 Run Command
 
 - **With the virtual environment active and environment variables set, run:**
-  - `python weather_food_books_cocktails_gui.py`
+  - `python main.py`
 
 #### 6.2 Step 1 – Auth Dialog
 
