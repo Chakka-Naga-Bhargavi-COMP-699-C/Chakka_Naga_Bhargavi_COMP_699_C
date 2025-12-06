@@ -1,57 +1,66 @@
-1. Prerequisites
+## Build and Run Instructions
 
-Python: 3.8 or newer
+### 1. Prerequisites
 
-Check version:
-python --version
+#### 1.1 Python
 
-Tkinter: usually bundled with Python
+- **Required version:** Python **3.8 or newer**
+- **Check version:**
+  - `python --version`
 
-Quick check (no error = OK):
-python -c "import tkinter; print('Tkinter OK')"
+#### 1.2 Tkinter
 
-Internet access: required for:
+- **Tkinter:** usually bundled with Python
+- **Quick check (no error = OK):**
+  - `python -c "import tkinter; print('Tkinter OK')"`
 
-OpenWeatherMap
+#### 1.3 Internet Access
 
-Spoonacular
+- **Internet access is required for:**
+  - **OpenWeatherMap**
+  - **Spoonacular**
+  - **Google Books**
+  - **TheCocktailDB**
+  - **ipgeolocation.io** (for **Detect Location**)
 
-Google Books
+---
 
-TheCocktailDB
+### 2. Project Setup
 
-ipgeolocation.io (for Detect Location)
+#### 2.1 Create Project Folder
 
-2. Project Setup
+- **Create a folder anywhere on your machine**, for example:
+  - `C:\Projects\weather_recommender`
 
-Create a folder anywhere on your machine, for example:
-C:\Projects\weather_recommender
+#### 2.2 Save the Script
 
-Save your script in that folder as:
-weather_food_books_cocktails_gui.py
+- **Save your script in that folder as:**
+  - `weather_food_books_cocktails_gui.py`
+- **Your folder will look like:**
 
-Your folder will look like:
+      weather_recommender/
+      └── weather_food_books_cocktails_gui.py
 
-weather_recommender/
-└── weather_food_books_cocktails_gui.py
+---
 
-3. Create & Activate a Virtual Environment (recommended)
+### 3. Create & Activate a Virtual Environment (Recommended)
 
-From inside the project folder:
+#### 3.1 Create the Virtual Environment
 
-python -m venv venv
+- **From inside the project folder, run:**
+  - `python -m venv venv`
 
+#### 3.2 Activate on Windows (Command Prompt)
 
-Windows (Command Prompt):
+- **Command:**
+  - `venv\Scripts\activate`
 
-venv\Scripts\activate
+#### 3.3 Activate on Windows (PowerShell)
 
+- **Command:**
+  - `venv\Scripts\Activate.ps1`
 
-Windows (PowerShell):
+#### 3.4 Activate on macOS / Linux
 
-venv\Scripts\Activate.ps1
-
-
-macOS / Linux:
-
-source venv/bin/activate
+- **Command:**
+  - `source venv/bin/activate`
