@@ -34,15 +34,25 @@ os.makedirs(HISTORY_DIR, exist_ok=True)
 # =========================
 #    Utilities / Helpers
 # =========================
+# Architectural role:
+# - These helper functions support cross-cutting concerns in the Core/Util package from the class diagram:
+#   hashing, date formatting, JSON persistence, and clipboard support.
+# - They indirectly support multiple UCs (UC-1..UC-7 for auth, UC-29..UC-33 for history, UC-34..UC-37 for catalogs)
+#   by providing reusable infrastructure rather than domain-specific logic.
 
 def now_iso():
+    # Maps to the need for consistent timestamps in History (FR 5.1, UC-29/UC-31) and auditability.
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 def sha256(s: str) -> str:
+    # Low-level security helper used by AuthManager to hash secrets
+    # and support Security Requirements around safe credential storage.
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
 def password_hash(password: str, salt: Optional[str] = None) -> Tuple[str, str]:
     """Return (salt, hash)."""
+    # This function implements salted hashing for passwords (Application of Security Req. 2.2)
+    # and is called from AuthManager.register/change_password/reset to support UC-1, UC-3, UC-5.
     if not salt:
         salt = secrets.token_hex(16)
     return salt, sha256(salt + password)
@@ -52,6 +62,9 @@ def load_json(path: str, default):
     Safe JSON loader.
     Returns default on error. (CatalogManager will additionally notify admins.)
     """
+    # Shared persistence helper for AuthManager, HistoryManager, CatalogManager:
+    # - Enables local JSON catalogs and history (FR 4.1, 5.1).
+    # - Supports the offline-first constraint in the System Request.
     try:
         if os.path.exists(path):
             with open(path, "r", encoding="utf-8") as f:
@@ -61,6 +74,9 @@ def load_json(path: str, default):
     return default
 
 def save_json(path: str, data):
+    # Complement to load_json(), writing local data for users, catalogs, and history.
+    # Used by classes that implement UC-1..UC-7 (AuthManager), UC-29..UC-33 (HistoryManager),
+    # and UC-34..UC-37 (CatalogManager).
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
@@ -70,6 +86,7 @@ def save_json(path: str, data):
         return False
 
 def copy_to_clipboard(root: tk.Tk, text: str):
+    # Small UI utility used when password reset links need to be surfaced without a server (UC-4 / FR 1.4).
     try:
         root.clipboard_clear()
         root.clipboard_append(text)
@@ -81,6 +98,9 @@ def copy_to_clipboard(root: tk.Tk, text: str):
 # =========================
 #     Admin Notifications
 # =========================
+# Class role: AdminNotifier is the implementation of the "Notifier" concept in the class diagram,
+# providing operational alerts (FR 6.5, UC-38: Receive Operational Alerts).
+# It is used by WeatherClient and CatalogManager to route critical issues to admin users.
 
 class AdminNotifier:
     """
@@ -90,9 +110,11 @@ class AdminNotifier:
     """
     def __init__(self, app_getter):
         # app_getter is a callable returning the current App instance (to avoid circular refs)
+        # Relationship to App: App owns AdminNotifier in composition (as per class diagram "Core/Util").
         self.app_getter = app_getter
 
     def _should_notify(self) -> bool:
+        # Checks UC-8 (Toggle Admin Alerts) and ensures only admins who opted in see these warnings.
         app = self.app_getter()
         if not app or not app.current_user:
             return False
@@ -103,6 +125,7 @@ class AdminNotifier:
             return False
 
     def alert(self, title: str, message: str):
+        # Called from WeatherClient and CatalogManager on error paths (UC-11/UC-13 and UC-34..UC-37).
         logging.warning(f"[ADMIN ALERT] {title}: {message}")
         if self._should_notify():
             try:
@@ -113,11 +136,14 @@ class AdminNotifier:
 # =========================
 #          Email
 # =========================
+# Class role: EmailHelper is the boundary to SMTP in the class diagram, supporting password reset flows.
+# It implements part of UC-4 (Reset Password – Send Reset Link) and FR 1.4.
 
 class EmailHelper:
     """SMTP email sender (optional). Uses env vars if present."""
     @staticmethod
     def send_reset_email(to_email: str, reset_link: str) -> bool:
+        # Reads configuration from env variables to meet Security/Config constraints.
         host = os.getenv("SMTP_HOST")
         port = int(os.getenv("SMTP_PORT", "587"))
         user = os.getenv("SMTP_USER")
@@ -135,6 +161,7 @@ class EmailHelper:
         msg["To"] = to_email
 
         try:
+            # Uses TLS for secure transport per Security Requirements (2.x).
             context = ssl.create_default_context()
             with smtplib.SMTP(host, port, timeout=20) as server:
                 server.starttls(context=context)
@@ -148,6 +175,10 @@ class EmailHelper:
 # =========================
 #        Auth Store
 # =========================
+# Class role: AuthManager corresponds to the "Auth" component in the class diagram.
+# It implements FR 1.x (User Registration and Account Management) and UCs:
+# UC-1 Register, UC-2 Sign In, UC-3 Change Password, UC-4/UC-5 Reset Password,
+# UC-6 Sign Out (in coordination with App), UC-7 Delete Account, UC-8 Toggle Admin Alerts.
 
 class AuthManager:
     """
@@ -167,19 +198,24 @@ class AuthManager:
     }
     """
     def __init__(self, path=USERS_PATH):
+        # Loads persistent account data from JSON (offline-first requirement, FR 4.1 style usage).
         self.path = path
         self.data = load_json(self.path, {"users": {}})
 
     def _save(self):
+        # Internal helper to persist user store after any change (supports FR 1.1..1.7).
         return save_json(self.path, self.data)
 
     def exists(self, email: str) -> bool:
+        # Used during Register and Delete flows (UC-1, UC-7).
         return email in self.data["users"]
 
     def is_admin(self, email: str) -> bool:
+        # Enables Admin-only features (AdminPanel, AdminNotifier) as described in UC-34..UC-38.
         return bool(self.data["users"].get(email, {}).get("is_admin", False))
 
     def register(self, email: str, password: str, is_admin: bool = False) -> Tuple[bool, str]:
+        # Implements UC-1 (Register) and FR 1.1 (Creating a new account).
         email = email.strip().lower()
         if not email or not password:
             return False, "Email and password required."
@@ -197,6 +233,7 @@ class AuthManager:
         return True, "Registered successfully."
 
     def authenticate(self, email: str, password: str) -> bool:
+        # Implements UC-2 (Sign In) and supports the Authentication requirement.
         email = email.strip().lower()
         u = self.data["users"].get(email)
         if not u: return False
@@ -206,6 +243,7 @@ class AuthManager:
 
     def change_password(self, email: str, current_password: str, new_password: str) -> Tuple[bool, str]:
         """NEW: Used by User tab."""
+        # Implements UC-3 (Change Password) and FR 1.2/1.5 around account management.
         email = email.strip().lower()
         if not self.authenticate(email, current_password):
             return False, "Current password is incorrect."
@@ -216,6 +254,7 @@ class AuthManager:
         return True, "Password changed successfully."
 
     def start_reset(self, email: str) -> Tuple[bool, str]:
+        # Implements the "start" part of UC-4 (Reset Password – Send Reset Link).
         email = email.strip().lower()
         if not self.exists(email):
             return False, "No account for that email."
@@ -229,9 +268,11 @@ class AuthManager:
         if sent:
             return True, "Reset link emailed."
         else:
+            # In offline mode, we still support UC-4 by copying link to clipboard.
             return True, f"Email not configured. Reset link copied to clipboard:\n{link}"
 
     def finish_reset(self, email: str, token: str, new_password: str) -> Tuple[bool, str]:
+        # Completes UC-5 (Reset Password – Finish Reset) using the token issued above.
         email = email.strip().lower()
         u = self.data["users"].get(email)
         if not u or "reset" not in u:
@@ -248,16 +289,19 @@ class AuthManager:
         return True, "Password updated."
 
     def set_notify(self, email: str, notify: bool):
+        # Supports UC-8 (Toggle Admin Alerts) and FR 1.7 (notifications preference).
         email = email.strip().lower()
         if self.exists(email):
             self.data["users"][email]["notify"] = bool(notify)
             self._save()
 
     def get_notify(self, email: str) -> bool:
+        # Read side of the same preference, used by AdminNotifier._should_notify().
         email = email.strip().lower()
         return bool(self.data["users"].get(email, {}).get("notify", False))
 
     def delete_account(self, email: str) -> bool:
+        # Implements UC-7 (Delete Account) and supports FR 1.6, including cleanup of user history.
         email = email.strip().lower()
         if self.exists(email):
             del self.data["users"][email]
@@ -271,9 +315,13 @@ class AuthManager:
                 logging.warning(f"Failed to delete history: {e}")
             return True
         return False
+
 # =========================
 #      History Store
 # =========================
+# Class role: HistoryManager implements FR 5.x (History and Export) and UCs:
+# UC-29 View History, UC-30 Delete History Item, UC-31 Export History,
+# UC-32 Add Entry, UC-33 Attach Weather Snapshot.
 
 class HistoryManager:
     """
@@ -290,15 +338,19 @@ class HistoryManager:
     """
     @staticmethod
     def history_path_for(email: str) -> str:
+        # Generates a file-safe path for a user's history file (supports offline, per-user history).
         safe = re.sub(r"[^a-zA-Z0-9_.-]+", "_", email)
         return os.path.join(HISTORY_DIR, f"history_{safe}.json")
 
     def __init__(self, user_email: str):
+        # On object instantiation (as seen in the Object Diagram), each signed-in session gets its own history store.
         self.user_email = user_email
         self.path = self.history_path_for(user_email)
         self.items = load_json(self.path, [])
 
     def add(self, item_type: str, label: str, metadata: Dict, weather_snapshot: Dict):
+        # Core write operation for UC-32/UC-33:
+        # Adds a food/book/drink recommendation with associated weather context (FR 5.1, 5.2).
         entry = {
             "timestamp": now_iso(),
             "type": item_type,
@@ -310,14 +362,17 @@ class HistoryManager:
         self.save()
 
     def delete_index(self, idx: int):
+        # Implements UC-30 (Delete History Item) at array-index granularity.
         if 0 <= idx < len(self.items):
             del self.items[idx]
             self.save()
 
     def save(self):
+        # Persists all history entries to disk, supporting FR 5.2 and local offline storage.
         save_json(self.path, self.items)
 
     def export_csv(self, filepath: str, selection: Optional[List[int]] = None):
+        # Implements CSV export side of UC-31 (Export History).
         rows = [self.items[i] for i in (selection or range(len(self.items)))]
 
         with open(filepath, "w", newline="", encoding="utf-8") as f:
@@ -329,6 +384,7 @@ class HistoryManager:
                             json.dumps(r["weather"], ensure_ascii=False)])
 
     def export_json(self, filepath: str, selection: Optional[List[int]] = None):
+        # Implements JSON export side of UC-31 (supporting FR 5.3 for alternative formats).
         rows = [self.items[i] for i in (selection or range(len(self.items)))]
 
         with open(filepath, "w", encoding="utf-8") as f:
@@ -337,6 +393,10 @@ class HistoryManager:
 # =========================
 #        Catalogs (NEW)
 # =========================
+# Class role: CatalogManager is the Catalogs manager from the class diagram,
+# and implements FR 4.x (Catalog and Content Management) plus admin UCs:
+# UC-34 Manage Catalogs, UC-35 Add Catalog Item, UC-36 Edit Catalog Item, UC-37 Delete Catalog Item.
+# It also supports mood-based ideas (UC-13, UC-17, UC-21, UC-27) through admin-curated lists.
 
 class CatalogManager:
     """
@@ -351,11 +411,13 @@ class CatalogManager:
     DEFAULT = {"foods": [], "beverages": [], "books": []}
 
     def __init__(self, path: str, notifier: Optional[AdminNotifier] = None):
+        # App composes this object at startup as shown in the Object Diagram.
         self.path = path
         self.notifier = notifier
         self.data = self._load_with_guard()
 
     def _load_with_guard(self):
+        # Fault-tolerant loader that raises admin alerts if catalog JSON is corrupted (FR 6.5 / UC-38).
         data = None
         try:
             if os.path.exists(self.path):
@@ -379,15 +441,18 @@ class CatalogManager:
         return data
 
     def _save_with_guard(self, data: dict) -> bool:
+        # Central write operation for catalogs; on failure, notifies admin (UC-35..UC-37 + UC-38).
         ok = save_json(self.path, data)
         if not ok and self.notifier:
             self.notifier.alert("Catalog Save Error", "Failed to save catalogs to disk.")
         return ok
 
     def all(self) -> dict:
+        # Read view used by WeatherTab, RecipesTab, BooksTab, CocktailsTab to seed ideas (UC-13, UC-17, UC-21, UC-27).
         return self.data
 
     def add_item(self, category: str, value: str) -> bool:
+        # Implements UC-35 (Add Catalog Item) in the Admin Panel.
         category = category.lower()
         if category not in self.data:
             self.data[category] = []
@@ -397,6 +462,7 @@ class CatalogManager:
         return False
 
     def edit_item(self, category: str, old_value: str, new_value: str) -> bool:
+        # Implements UC-36 (Edit Catalog Item).
         category = category.lower()
         lst = self.data.get(category, [])
         try:
@@ -407,6 +473,7 @@ class CatalogManager:
             return False
 
     def delete_item(self, category: str, value: str) -> bool:
+        # Implements UC-37 (Delete Catalog Item).
         category = category.lower()
         lst = self.data.get(category, [])
         try:
@@ -418,14 +485,20 @@ class CatalogManager:
 # -------------------------------
 #            API Clients
 # -------------------------------
+# These classes correspond to the "API Clients" package in the class diagram:
+# WeatherClient, SpoonacularClient, GoogleBooksClient, CocktailDBClient.
+# They implement FR 2.x (Location & Weather Integration) and parts of FR 3.x (Recommendations),
+# and support UCs: UC-9..UC-13, UC-16, UC-20, UC-25..UC-27, etc.
 
 class WeatherClient:
     """Lightweight OpenWeatherMap wrapper for current weather."""
     def __init__(self, api_key: str, notifier: Optional[AdminNotifier] = None):
+        # External configuration via env vars aligns with the System Request "optional weather API" constraint.
         self.api_key = api_key
         self.notifier = notifier
 
     def current_by_city(self, city: str) -> Dict:
+        # Implements UC-10 (Get Weather by City), invoked from WeatherTab.fetch_weather().
         url = "https://api.openweathermap.org/data/2.5/weather"
         params = {"q": city, "appid": self.api_key, "units": "metric"}
         try:
@@ -454,14 +527,17 @@ class WeatherClient:
 
     @staticmethod
     def icon_url(icon_code: str) -> str:
+        # Helper to map OpenWeatherMap icon codes into URLs for UI (FR 2.3 – show conditions).
         return f"https://openweathermap.org/img/wn/{icon_code}@2x.png"
 
 class SpoonacularClient:
     """Spoonacular recipe search (complexSearch)."""
     def __init__(self, api_key: str):
+        # Represents the RecipesService boundary from the sequence diagram.
         self.api_key = api_key
 
     def search(self, query: str, number: int = 8, tags: Optional[List[str]] = None) -> List[Dict]:
+        # Implements UC-16 (Search Recipes) and supports FR 3.1/3.5 for food recommendations.
         url = "https://api.spoonacular.com/recipes/complexSearch"
         params = {
             "apiKey": self.api_key,
@@ -484,9 +560,11 @@ class SpoonacularClient:
 class GoogleBooksClient:
     """Google Books simple search wrapper."""
     def __init__(self, api_key: str):
+        # Implements the BooksService boundary from the class diagram.
         self.api_key = api_key
 
     def search(self, query: str, max_results: int = 20, start_index: int = 0) -> List[Dict]:
+        # Implements UC-20 (Search Books) and FR 3.1/3.5 for book side of the bundle.
         url = "https://www.googleapis.com/books/v1/volumes"
         params = {
             "q": query,
@@ -509,6 +587,7 @@ class CocktailDBClient:
     BASE = "https://www.thecocktaildb.com/api/json/v1/1"
 
     def search_by_name(self, name: str) -> List[Dict]:
+        # Implements UC-25 (Search Drinks by name).
         try:
             r = requests.get(f"{self.BASE}/search.php", params={"s": name}, timeout=12)
             r.raise_for_status()
@@ -519,6 +598,7 @@ class CocktailDBClient:
             return []
 
     def filter_by_alcoholic(self, kind: str) -> List[Dict]:
+        # Used to support filtering logic in CocktailsTab (UC-26).
         try:
             r = requests.get(f"{self.BASE}/filter.php", params={"a": kind}, timeout=12)
             r.raise_for_status()
@@ -529,6 +609,7 @@ class CocktailDBClient:
             return []
 
     def filter_by_ingredient(self, ingredient: str) -> List[Dict]:
+        # Supports UC-27 (Drink Ideas from Mood) where ingredient-derived queries are used.
         try:
             r = requests.get(f"{self.BASE}/filter.php", params={"i": ingredient}, timeout=12)
             r.raise_for_status()
@@ -539,6 +620,7 @@ class CocktailDBClient:
             return []
 
     def lookup_by_id(self, drink_id: str) -> Optional[Dict]:
+        # Provides detailed drink data to CocktailsTab.open_cocktail_page() (UC-24).
         try:
             r = requests.get(f"{self.BASE}/lookup.php", params={"i": drink_id}, timeout=12)
             r.raise_for_status()
@@ -549,12 +631,15 @@ class CocktailDBClient:
             logging.error(f"CocktailDB error: {e}")
             return None
 
-
 # -------------------------------
 #     Weather → Mood Mapping
 # -------------------------------
+# These functions implement the rule-plus-tags "mood" mapping described in the Design & Implementation Choices.
+# They bridge FR 2.x (weather) and FR 3.x (recommendations) by mapping raw weather to comfort labels,
+# used in UCs UC-13, UC-17, UC-21, UC-27 (Weather-based suggestions).
 
 def derive_mood(weather_desc: str, temp_c: float) -> Dict[str, str]:
+    # Core rule engine: maps temperature and conditions to seed queries for food/book/drinks.
     desc = (weather_desc or "").lower()
     t = temp_c if isinstance(temp_c, (int, float)) else None
     if t is not None:
@@ -581,6 +666,8 @@ def mood_food_ideas(weather_desc: str, temp_c: float, catalogs: Optional[dict] =
     """
     NEW: Appends admin-managed catalog food entries to weather ideas.
     """
+    # Supports UC-13 (Show Weather-Based Suggestions) and UC-17 (Food Ideas from Mood),
+    # combining algorithmic mood mapping with admin-curated catalog items.
     m = derive_mood(weather_desc, temp_c)
     q = m["food_query"].lower()
     base = []
@@ -602,6 +689,7 @@ def mood_food_ideas(weather_desc: str, temp_c: float, catalogs: Optional[dict] =
     return list(dict.fromkeys(extras + base))  # extras first, dedupe preserving order
 
 def mood_drink_ideas(weather_desc: str, temp_c: float, catalogs: Optional[dict] = None) -> List[str]:
+    # Supports UC-27 (Drink Ideas from Mood) and FR 3.1/3.7 for beverages.
     desc = (weather_desc or "").lower()
     t = temp_c if isinstance(temp_c, (int, float)) else None
     base: List[str]
@@ -621,10 +709,14 @@ def mood_drink_ideas(weather_desc: str, temp_c: float, catalogs: Optional[dict] 
 # -------------------------------
 #            UI: Auth
 # -------------------------------
+# UI classes (LoginDialog, UserTab, AdminPanel, WeatherTab, RecipesTab, BooksTab, CocktailsTab, HistoryTab)
+# correspond to the "UI (Tkinter)" package in the class diagram. They realize the concrete interactions
+# from the Use-Case Diagram and Sequence Diagram by calling core managers and API clients.
 
 class LoginDialog(tk.Toplevel):
     """Modal auth dialog: Sign In / Register / Reset."""
     def __init__(self, master, auth: AuthManager):
+        # Implements the UI boundary for UC-1 (Register), UC-2 (Sign In), UC-4/UC-5 (Reset Password).
         super().__init__(master)
         self.title("Sign In")
         self.resizable(False, False)
@@ -687,6 +779,7 @@ class LoginDialog(tk.Toplevel):
         self.bind("<Return>", lambda _e: self._do_sign_in())
 
     def _do_sign_in(self):
+        # UI handler for UC-2 (Sign In): calls AuthManager.authenticate() and returns email to App.
         e = (self.si_email.get() or "").strip().lower()
         p = self.si_pass.get() or ""
         if self.auth.authenticate(e, p):
@@ -696,6 +789,7 @@ class LoginDialog(tk.Toplevel):
             messagebox.showerror("Sign In", "Invalid email or password.")
 
     def _do_register(self):
+        # UI handler for UC-1 (Register) and optional admin setup.
         e = (self.re_email.get() or "").strip().lower()
         p = self.re_pass.get() or ""
         c = self.re_conf.get() or ""
@@ -710,6 +804,7 @@ class LoginDialog(tk.Toplevel):
             messagebox.showerror("Register", msg)
 
     def _do_send_reset(self):
+        # UI handler for UC-4 (Reset Password – Send Reset Link) using AuthManager.start_reset().
         e = (self.rs_email.get() or "").strip().lower()
         ok, msg = self.auth.start_reset(e)
         if ok and "copied to clipboard" in msg:
@@ -717,6 +812,7 @@ class LoginDialog(tk.Toplevel):
         messagebox.showinfo("Reset", msg)
 
     def _do_finish_reset(self):
+        # UI handler for UC-5 (Reset Password – Finish Reset).
         e = (self.rs_email.get() or "").strip().lower()
         t = (self.r_token.get() or "").strip()
         n = self.r_newpw.get() or ""
@@ -735,6 +831,9 @@ class WeatherTab(ttk.Frame):
     Weather tab with mini previews + Detect Location + Refresh.
     """
     def __init__(self, master, weather_client, books_client, catalog_mgr: CatalogManager):
+        # Implements UC-9 (Detect Location), UC-10 (Get Weather by City), UC-11 (Refresh Weather),
+        # UC-12 (Share Weather to Other Tabs), UC-13 (Show Weather-Based Suggestions),
+        # UC-14 (Derive Mood from Weather) at the UI level.
         super().__init__(master)
         self.client = weather_client
         self.books_client = books_client
@@ -775,11 +874,13 @@ class WeatherTab(ttk.Frame):
         self.latest = None
 
     def _threaded(self, fn):
+        # Helper to keep network-bound operations responsive (supports Performance Requirement 1.1).
         t = threading.Thread(target=fn, daemon=True)
         t.start()
 
     def detect_location(self):
         """Detect the user's location automatically using ipgeolocation.io (requires IPGEOLOCATION_API_KEY)."""
+        # Implements UC-9 (Detect Location) and fulfills FR 2.2.
         def work():
             try:
                 api_key = os.getenv("IPGEOLOCATION_API_KEY")
@@ -810,12 +911,14 @@ class WeatherTab(ttk.Frame):
         self._threaded(work)
 
     def refresh_weather(self):
+        # Implements UC-11 (Refresh Weather) aligning with FR 2.5.
         if not self.city_entry.get().strip():
             messagebox.showinfo("Refresh", "Enter a city or detect location first.")
             return
         self.fetch_weather()
 
     def fetch_weather(self):
+        # UI-level handler for UC-10 (Get Weather by City) calling WeatherClient.current_by_city().
         city = self.city_entry.get().strip()
         if not city:
             messagebox.showerror("Error", "Please enter a city.")
@@ -855,11 +958,13 @@ class WeatherTab(ttk.Frame):
         self._threaded(work)
 
     def _clear_previews(self):
+        # Helper to reset weather-based lists when an error or new city is loaded.
         self.food_list.delete(0, tk.END)
         self.books_list.delete(0, tk.END)
         self.drinks_list.delete(0, tk.END)
 
     def _update_previews(self):
+        # Implements UC-13/UC-14: derive mood and update local suggestions for food/books/drinks.
         self._clear_previews()
         w = self.latest or {}
         desc = w.get("description", "")
@@ -875,6 +980,7 @@ class WeatherTab(ttk.Frame):
         q = mood.get("book_query", "popular fiction")
 
         def load_books():
+            # Uses GoogleBooksClient to fetch mood-based book suggestions (UC-21, UC-20).
             self.books_list.insert(tk.END, "Loading…")
             items = self.books_client.search(q, max_results=10, start_index=0)
             self.books_list.delete(0, tk.END)
@@ -891,15 +997,17 @@ class WeatherTab(ttk.Frame):
         self._threaded(load_books)
 
     def push_to_others(self):
+        # Implements UC-12 and UC-33 link: signals App to snapshot current weather for other tabs and history.
         if not self.latest:
             messagebox.showinfo("Info", "Get weather first.")
             return
         self.master.event_generate("<<WeatherUpdated>>", when="tail")
 
-
 class RecipesTab(ttk.Frame):
     """Comfort Food with ideas → recipes, plus Save Selected to History."""
     def __init__(self, master, spoon_client, weather_tab, catalog_mgr: CatalogManager):
+        # Implements the Recipes side of FR 3.x:
+        # UC-16 (Search Recipes), UC-17 (Food Ideas from Mood), UC-18 (Save Recipe to History).
         super().__init__(master)
         self.client = spoon_client
         self.weather_tab = weather_tab
@@ -927,6 +1035,7 @@ class RecipesTab(ttk.Frame):
         self.status = tk.StringVar(value=""); ttk.Label(self, textvariable=self.status).pack(anchor="w", padx=10, pady=(4, 6))
 
     def populate_ideas(self):
+        # Implements UC-17 (Food Ideas from Mood) by calling mood_food_ideas with WeatherTab.latest.
         w = (self.weather_tab.latest or {})
         ideas = mood_food_ideas(w.get("description", ""), w.get("temp_c"), self.catalog_mgr.all())
         self.ideas.delete(0, tk.END)
@@ -934,14 +1043,17 @@ class RecipesTab(ttk.Frame):
         self.status.set("Pick an idea to fetch recipes.")
 
     def _on_idea(self, _evt=None):
+        # Double-click on an idea triggers a search (UC-17 continuation).
         sel = self.ideas.curselection()
         if not sel: return
         idea = self.ideas.get(sel[0]); self.search_for(idea)
 
     def search_direct(self):
+        # Direct keyword search for recipes, supporting FR 3.5 (filter/search).
         q = self.query_entry.get().strip() or "comfort food"; self.search_for(q)
 
     def search_for(self, query: str):
+        # Calls SpoonacularClient.search() to implement UC-16 (Search Recipes).
         self.results.delete(0, tk.END); self.items = []; self.status.set(f"Searching recipes for: {query}")
         def work():
             data = self.client.search(query, number=12)
@@ -955,6 +1067,7 @@ class RecipesTab(ttk.Frame):
         threading.Thread(target=work, daemon=True).start()
 
     def _try_open_url(self, url: str) -> bool:
+        # Helper that checks if a live URL is accessible before opening in browser.
         if not url: return False
         try:
             r = requests.get(url, timeout=6, allow_redirects=True)
@@ -965,6 +1078,7 @@ class RecipesTab(ttk.Frame):
             return False
 
     def open_recipe(self, _evt=None):
+        # Implements UC-15 (Open Recipe Details) by opening an external URL or constructing a local popup.
         sel = self.results.curselection()
         if not sel or not self.items: return
         idx = sel[0]; item = self.items[idx]
@@ -1004,6 +1118,7 @@ class RecipesTab(ttk.Frame):
             messagebox.showerror("Recipe", "Could not load recipe details. Please try another result.")
 
     def save_selected(self):
+        # Implements UC-18 (Save Recipe to History) by calling HistoryManager.add().
         sel = self.results.curselection()
         if not sel or not self.items:
             messagebox.showinfo("History", "Select a recipe first."); return
@@ -1018,6 +1133,9 @@ class RecipesTab(ttk.Frame):
         messagebox.showinfo("History", f"Saved to history:\n{label}")
 
 class BooksTab(ttk.Frame):
+    # Implements FR 3.x for Books and UCs:
+    # UC-19 (Open Book Details), UC-20 (Search Books), UC-21 (Book Ideas from Mood),
+    # UC-22 (Filter by Decade), UC-23 (Save Book to History).
     DECADES = ["Any", "1950s", "1960s", "1970s", "1980s", "1990s", "2000s", "2010s", "2020s"]
     def __init__(self, master, gb_client, weather_tab, catalog_mgr: CatalogManager):
         super().__init__(master)
@@ -1047,14 +1165,17 @@ class BooksTab(ttk.Frame):
         self.results.bind("<Double-Button-1>", self.open_google_books)
 
     def _parse_year(self, date_str: str) -> Optional[int]:
+        # Helper to interpret Google Books publication dates for decade filtering (UC-22).
         if not date_str: return None
         m = re.match(r"(\d{4})", date_str); return int(m.group(1)) if m else None
 
     def _decade_bounds(self, decade_label: str) -> Tuple[Optional[int], Optional[int]]:
+        # Converts a UI label like "1990s" into numeric bounds.
         if decade_label == "Any": return None, None
         start = int(decade_label[:4]); return start, start + 9
 
     def _filter_by_decade(self, items: List[Dict], decade_label: str) -> List[Dict]:
+        # Implements UC-22 logic after a Google Books API search.
         lo, hi = self._decade_bounds(decade_label)
         if lo is None: return items
         out = []
@@ -1066,22 +1187,26 @@ class BooksTab(ttk.Frame):
         return out
 
     def use_mood(self):
+        # Implements UC-21 (Book Ideas from Mood) using derive_mood like WeatherTab.
         w = (self.weather_tab.latest or {})
         mood = derive_mood(w.get("description", ""), w.get("temp_c"))
         self.query_entry.delete(0, tk.END); self.query_entry.insert(0, mood["book_query"])
         self.decade_var.set("Any"); self.search()
 
     def shuffle(self):
+        # Adds variety within the same genre by changing the start index (improves recommendation diversity).
         q = self.query_entry.get().strip() or "popular fiction"
         self._search_internal(q, start_index=random.choice([0, 20, 40, 60, 80]))
 
     def search(self):
+        # Implements UC-20 (Search Books) and ties into FR 3.5 (filter/search by preference).
         q = self.query_entry.get().strip() or "popular fiction"
         start_index = random.choice([0, 10, 20, 30, 40]) if q == self.last_query else 0
         self.last_query = q
         self._search_internal(q, start_index=start_index)
 
     def _search_internal(self, q: str, start_index: int = 0):
+        # Internal worker that calls GoogleBooksClient and applies decade filter (UC-20, UC-22).
         self.results.delete(0, tk.END)
         def work():
             items = self.client.search(q, max_results=20, start_index=start_index)
@@ -1102,6 +1227,7 @@ class BooksTab(ttk.Frame):
         threading.Thread(target=work, daemon=True).start()
 
     def open_google_books(self, _evt=None):
+        # Implements UC-19 (Open Book Details) by opening the infoLink in the browser.
         sel = self.results.curselection()
         if not sel or not self.items: return
         idx = sel[0]; item = self.items[idx]
@@ -1110,6 +1236,7 @@ class BooksTab(ttk.Frame):
         if url: webbrowser.open(url)
 
     def save_selected(self):
+        # Implements UC-23 (Save Book to History) via HistoryManager.
         sel = self.results.curselection()
         if not sel:
             messagebox.showinfo("History", "Select a book first."); return
@@ -1133,6 +1260,9 @@ class BooksTab(ttk.Frame):
 class CocktailsTab(ttk.Frame):
     """Beverages with ideas → results, filter + Save Selected."""
     def __init__(self, master, c_client, weather_tab, catalog_mgr: CatalogManager):
+        # Implements FR 3.x (Beverage Recommendations) and UCs:
+        # UC-24 (Open Drink Details), UC-25 (Search Drinks), UC-26 (Filter Alcoholic/Non-Alcoholic),
+        # UC-27 (Drink Ideas from Mood), UC-28 (Save Drink to History).
         super().__init__(master)
         self.client = c_client
         self.weather_tab = weather_tab
@@ -1165,23 +1295,27 @@ class CocktailsTab(ttk.Frame):
         self.results.bind("<Double-Button-1>", self.open_cocktail_page)
 
     def populate_ideas(self):
+        # Implements UC-27 (Drink Ideas from Mood) using mood_drink_ideas.
         w = (self.weather_tab.latest or {})
         ideas = mood_drink_ideas(w.get("description", ""), w.get("temp_c"), self.catalog_mgr.all())
         self.ideas.delete(0, tk.END)
         for it in ideas: self.ideas.insert(tk.END, it)
 
     def _on_idea(self, _evt=None):
+        # Double-click on idea triggers ingredient- or name-based search.
         sel = self.ideas.curselection()
         if not sel: return
         idea = self.ideas.get(sel[0]); self.search_for_idea(idea)
 
     def search_direct(self):
+        # Implements UC-25 (Search Drinks) from explicit keyword.
         q = self.query_entry.get().strip()
         if not q:
             messagebox.showinfo("Info", "Enter a drink keyword or use Weather Mood."); return
         self._search_drinks(q)
 
     def search_for_idea(self, idea_label: str):
+        # Applies domain-specific heuristic for "X drinks" → ingredient (UC-27 variant).
         m = re.match(r"^(\w+)\s+drinks$", idea_label.strip(), re.IGNORECASE)
         if m:
             ingredient = m.group(1); self._search_drinks_by_ingredient(ingredient)
@@ -1189,6 +1323,7 @@ class CocktailsTab(ttk.Frame):
             self._search_drinks(idea_label)
 
     def _search_drinks_by_ingredient(self, ingredient: str):
+        # Implements UC-27 via CocktailDBClient.filter_by_ingredient() → detailed lookup.
         self.results.delete(0, tk.END); self.items = []
         def work():
             base = self.client.filter_by_ingredient(ingredient)
@@ -1205,6 +1340,7 @@ class CocktailsTab(ttk.Frame):
         threading.Thread(target=work, daemon=True).start()
 
     def _search_drinks(self, query: str):
+        # Implements UC-25 via CocktailDBClient.search_by_name() with ingredient fallback.
         self.results.delete(0, tk.END); self.items = []
         def work():
             drinks = self.client.search_by_name(query) or []
@@ -1222,6 +1358,7 @@ class CocktailsTab(ttk.Frame):
         threading.Thread(target=work, daemon=True).start()
 
     def _apply_filter(self, drinks: List[Dict]) -> List[Dict]:
+        # Implements UC-26 (Filter Alcoholic / Non-Alcoholic) based on UI combobox selection.
         mode = self.filter_var.get()
         if mode == "All": return drinks
         target = "Non alcoholic" if mode == "Non-Alcoholic" else "Alcoholic"
@@ -1238,6 +1375,7 @@ class CocktailsTab(ttk.Frame):
         return out
 
     def _reapply_filter(self):
+        # Re-applies UC-26 when the filter combobox changes.
         if not self.items: return
         filtered = self._apply_filter(self.items)
         self.results.delete(0, tk.END)
@@ -1249,6 +1387,7 @@ class CocktailsTab(ttk.Frame):
             self.results.insert(tk.END, f"{i}. {name} • {alc or 'Unknown'}")
 
     def open_cocktail_page(self, _evt=None):
+        # Implements UC-24 (Open Drink Details) by showing ingredients and instructions in a messagebox.
         sel = self.results.curselection()
         if not sel or not self.items: return
         idx = sel[0]; drink = self.items[idx]
@@ -1266,6 +1405,7 @@ class CocktailsTab(ttk.Frame):
         messagebox.showinfo("Drink Recipe", txt)
 
     def save_selected(self):
+        # Implements UC-28 (Save Drink to History).
         sel = self.results.curselection()
         if not sel or not self.items:
             messagebox.showinfo("History", "Select a drink first."); return
@@ -1281,6 +1421,7 @@ class CocktailsTab(ttk.Frame):
 class HistoryTab(ttk.Frame):
     """View / delete / export history."""
     def __init__(self, master, history: HistoryManager):
+        # UI for FR 5.x and UCs UC-29..UC-31 (view, delete, export).
         super().__init__(master)
         self.history = history
 
@@ -1302,6 +1443,7 @@ class HistoryTab(ttk.Frame):
         self.refresh()
 
     def refresh(self):
+        # Rebuilds the history view from HistoryManager.items (UC-29).
         for i in self.tree.get_children():
             self.tree.delete(i)
         for idx, it in enumerate(self.history.items):
@@ -1310,9 +1452,11 @@ class HistoryTab(ttk.Frame):
             self.tree.insert("", "end", iid=str(idx), values=(it["timestamp"], it["type"], it["label"], wtxt))
 
     def selected_indices(self) -> List[int]:
+        # Helper to map selected Treeview rows into HistoryManager indices.
         return [int(iid) for iid in self.tree.selection()]
 
     def delete_selected(self):
+        # Implements UC-30 (Delete History Item).
         idxs = sorted(self.selected_indices(), reverse=True)
         if not idxs:
             messagebox.showinfo("History", "Select rows to delete."); return
@@ -1321,6 +1465,7 @@ class HistoryTab(ttk.Frame):
         self.refresh()
 
     def export_selected(self, fmt="csv"):
+        # Implements partial export path of UC-31 (Export History).
         idxs = self.selected_indices()
         if not idxs:
             messagebox.showinfo("Export", "Select rows to export."); return
@@ -1339,6 +1484,7 @@ class HistoryTab(ttk.Frame):
             logging.error(e); messagebox.showerror("Export", "Failed to export.")
 
     def export_all(self, fmt="csv"):
+        # Implements full export path of UC-31 (all rows).
         path = filedialog.asksaveasfilename(
             defaultextension=f".{fmt}",
             filetypes=[("CSV","*.csv"),("JSON","*.json"),("All","*.*")]
@@ -1356,12 +1502,16 @@ class HistoryTab(ttk.Frame):
 # -------------------------------
 #        NEW: User Tab
 # -------------------------------
+# Class role: UserTab is the UI controller for user account maintenance:
+# implements UC-3 (Change Password), UC-6 (Sign Out via App), UC-7 (Delete Account via App),
+# UC-8 (Toggle Admin Alerts via Account menu).
 
 class UserTab(ttk.Frame):
     """
     Provides Change Password / Delete Account / Sign Out actions.
     """
     def __init__(self, master, app_ref):
+        # This tab directly interacts with App and AuthManager to handle account lifecycle actions.
         super().__init__(master)
         self.app = app_ref
 
@@ -1387,6 +1537,7 @@ class UserTab(ttk.Frame):
         ttk.Button(row2, text="Delete Account", command=self.app._delete_account).pack(side="left", padx=8)
 
     def _change_password(self):
+        # UI handler that invokes AuthManager.change_password() (UC-3).
         cur = self.curr_pw.get() or ""
         new = self.new_pw.get() or ""
         conf = self.conf_pw.get() or ""
@@ -1403,6 +1554,9 @@ class UserTab(ttk.Frame):
 # -------------------------------
 #      NEW: Admin Panel Tab
 # -------------------------------
+# Class role: AdminPanel is the UI implementation for catalog CRUD and admin-focused UCs:
+# UC-34 Manage Catalogs, UC-35 Add Catalog Item, UC-36 Edit Catalog Item, UC-37 Delete Catalog Item.
+# It manipulates CatalogManager from the "Core/Managers" layer.
 
 class AdminPanel(ttk.Frame):
     """
@@ -1422,6 +1576,7 @@ class AdminPanel(ttk.Frame):
         tip.grid(row=3, column=0, columnspan=3, sticky="w", padx=12, pady=(4,12))
 
     def _make_section(self, title: str, category: str, row_index: int):
+        # Builds a listbox + entry + buttons for one catalog category (foods, beverages, or books).
         box = ttk.LabelFrame(self, text=title)
         box.grid(row=row_index, column=0, sticky="nsew", padx=12, pady=8)
         box.columnconfigure(0, weight=1)
@@ -1434,6 +1589,7 @@ class AdminPanel(ttk.Frame):
         ent.grid(row=1, column=0, sticky="w", padx=8, pady=(0,8))
 
         def add_item():
+            # UI handler for UC-35 (Add Catalog Item).
             val = ent.get().strip()
             if not val: return
             if self.catalog_mgr.add_item(category, val):
@@ -1443,6 +1599,7 @@ class AdminPanel(ttk.Frame):
                 messagebox.showerror("Catalog", "Failed to add item (maybe duplicate).")
 
         def on_edit(_evt=None):
+            # UI handler for UC-36 (Edit Catalog Item) triggered by double-click.
             sel = lst.curselection()
             if not sel: return
             old = lst.get(sel[0])
@@ -1454,6 +1611,7 @@ class AdminPanel(ttk.Frame):
                     messagebox.showerror("Catalog", "Failed to edit item.")
 
         def on_delete():
+            # UI handler for UC-37 (Delete Catalog Item) triggered via button or Delete key.
             sel = lst.curselection()
             if not sel: return
             val = lst.get(sel[0])
@@ -1470,6 +1628,7 @@ class AdminPanel(ttk.Frame):
         lst.bind("<Delete>", lambda _e: on_delete())
 
     def _populate_list(self, lst: tk.Listbox, cat: str):
+        # Helper used whenever catalogs change to keep UI in sync.
         lst.delete(0, tk.END)
         for v in self.catalog_mgr.all().get(cat, []):
             lst.insert(tk.END, v)
@@ -1477,6 +1636,12 @@ class AdminPanel(ttk.Frame):
 # -------------------------------
 #             App
 # -------------------------------
+# Class role: App is the "Application controller" in the class diagram and the central lifeline
+# in the Sequence Diagram and Behavioral State Machine. It composes:
+# - Core managers: AuthManager, HistoryManager, CatalogManager, AdminNotifier
+# - API clients: WeatherClient, SpoonacularClient, GoogleBooksClient, CocktailDBClient
+# - UI tabs: WeatherTab, RecipesTab, BooksTab, CocktailsTab, HistoryTab, UserTab, AdminPanel
+# App implements the system boundary in the Use-Case Diagram and coordinates use-case flows.
 
 class App(tk.Tk):
     def __init__(self):
@@ -1485,6 +1650,7 @@ class App(tk.Tk):
         self.geometry("1120x780")
 
         # --- Auth gate ---
+        # Implements the SignedOut → SignedIn transition from the Behavioral State Machine diagram.
         self.auth = AuthManager()
         self.current_user: Optional[str] = None
         self.history: Optional[HistoryManager] = None
@@ -1498,6 +1664,7 @@ class App(tk.Tk):
             self.destroy(); return
 
         # --- API Keys (prefer env vars) ---
+        # Aligns with Design/Implementation choices: config via env vars, offline-friendly behavior.
         openweather_key = os.getenv("OPENWEATHER_API_KEY", "YOUR_OPENWEATHER_API_KEY")
         spoonacular_key = os.getenv("SPOONACULAR_API_KEY", "YOUR_SPOONACULAR_API_KEY")
         google_books_key = os.getenv("GOOGLE_BOOKS_API_KEY", "YOUR_GOOGLE_BOOKS_API_KEY")
@@ -1564,6 +1731,7 @@ class App(tk.Tk):
 
     # ---- Auth flow helpers ----
     def _run_login_flow(self):
+        # Implements the initial SignedOut state and transition to SignedIn (Behavioral State Machine).
         dlg = LoginDialog(self, self.auth)
         self.wait_window(dlg)
         self.current_user = dlg.result_email
@@ -1571,6 +1739,8 @@ class App(tk.Tk):
             self.history = HistoryManager(self.current_user)
 
     def _build_menu(self):
+        # Builds Account menu with notification toggle, sign-out, and delete-account:
+        # supports UC-6 (Sign Out), UC-7 (Delete Account), UC-8 (Toggle Admin Alerts).
         menubar = tk.Menu(self)
         acc = tk.Menu(menubar, tearoff=0)
         notify_var = tk.BooleanVar(value=self.auth.get_notify(self.current_user))
@@ -1585,12 +1755,14 @@ class App(tk.Tk):
         self.config(menu=menubar)
 
     def _sign_out(self):
+        # Implements UC-6 (Sign Out) and returns the app to the SignedOut → SignedIn loop.
         if messagebox.askyesno("Sign Out", "Sign out now?"):
             self.destroy()
             # Relaunch a fresh app instance
             root = App(); root.mainloop()
 
     def _delete_account(self):
+        # Coordinates UC-7 (Delete Account) with AuthManager.delete_account().
         if messagebox.askyesno("Delete Account", "This will delete your account and history. Continue?"):
             if self.auth.delete_account(self.current_user):
                 messagebox.showinfo("Account", "Account deleted.")
@@ -1601,7 +1773,8 @@ class App(tk.Tk):
 
     # ---- Events ----
     def on_weather_updated(self, _evt=None):
-        # Snapshot latest weather for history entries
+        # This handler is the link between WeatherTab and HistoryManager/other tabs, implementing UC-12/UC-33
+        # and the state transition "FetchingWeather → ShowingSuggestions → SavingSelection" in the state machine.
         w = self.tab_weather.latest or {}
         if w:
             self.last_weather_snapshot = {
@@ -1617,6 +1790,8 @@ class App(tk.Tk):
         self.tab_history.refresh()
 
     def show_api_info(self):
+        # Informational dialog describing external services; this supports transparency and helps
+        # explain external dependencies from the class diagram and system proposal.
         info = (
             "APIs used:\n"
             "• OpenWeatherMap – current weather & icons\n"
@@ -1631,4 +1806,6 @@ class App(tk.Tk):
         messagebox.showinfo("APIs", info)
 
 if __name__ == "__main__":
+    # Entry point: launching App() starts the UI and executes all use-case flows described
+    # in the Use-Case Diagram and validated by the Sequence and State Machine diagrams.
     App().mainloop()
